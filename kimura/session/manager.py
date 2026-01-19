@@ -60,28 +60,48 @@ class SessionManager:
         logger.info(f"{self.role.upper()}: Handshake completed")
 
     async def send_file(self, filepath: str):
-        """PHASE 2: Send file over EXISTING connection."""
+        """Client sends file post-handshake"""
         if not self.state_machine.is_ready_for_transfer():
-            raise RuntimeError("Must call establish_channel() first!")
-        await self.state_machine.transition("start_send_file", 
-                                          reader=self.reader,
-                                          writer=self.writer,
-                                          filepath=filepath)
-        logger.info(f"{self.role.upper()}: File transfer completed: {Path(filepath).name}")
+            raise RuntimeError("Handshake required first")
+        
+        with open(filepath, 'rb') as f:
+            file_data = f.read()
+        
+        filename = Path(filepath).name.encode()
+        filename_len = len(filename)
+        data_len = len(file_data)
+        
+        # Format: filename_len(4) + filename + data_len(8) + data
+        msg = (
+            filename_len.to_bytes(4, 'big') + 
+            filename + 
+            data_len.to_bytes(8, 'big') + 
+            file_data
+        )
+        
+        await self.state_machine.send_protected(self.reader, self.writer, msg)
+        logger.info(f"CLIENT sent {Path(filepath).name} ({len(file_data)/1024/1024:.1f}MB)")
+
 
     async def recv_file(self, output_path: str):
-        if not self.active_clients:
-            raise RuntimeError("No connected clients")
-        client_id, (reader, writer, sm) = next(iter(self.active_clients.items()))
-        if not sm.is_ready_for_transfer():
-            raise RuntimeError("Handshake incomplete for client")
-        await sm.transition(
-            "start_recv_file",
-            reader=reader,
-            writer=writer,
-            output_path=output_path
-        )
-        logger.info(f"SERVER: File verified from client #{client_id}")
+        """Server receives file post-handshake using THIS SessionManager's state_machine"""
+        if not self.state_machine.is_ready_for_transfer():
+            raise RuntimeError("Handshake required first")
+        
+        # Receive file using THIS session's reader (not active_clients!)
+        msg = await self.state_machine.recv_protected(self.reader)
+        
+        # Parse: filename_len(4) + filename + data_len(8) + data
+        filename_len = int.from_bytes(msg[:4], 'big')
+        filename = msg[4:4+filename_len].decode()
+        data_offset = 4 + filename_len
+        data_len = int.from_bytes(msg[data_offset:data_offset+8], 'big')
+        file_data = msg[data_offset+8:data_offset+8+data_len]
+        
+        with open(output_path, 'wb') as f:
+            f.write(file_data)
+        logger.info(f"SERVER received {filename} ({len(file_data)/1024/1024:.1f}MB) -> {output_path}")
+
 
     async def close(self):
         logger.info("SessionManager shutting down")
