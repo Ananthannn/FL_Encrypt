@@ -7,6 +7,10 @@ from crypto.keygen import (
     load_mlkem_server_keys, load_mlkem_client_keys,
     load_mldsa_server_keys, load_mldsa_client_keys
 )
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+import os 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 from pathlib import Path
@@ -68,3 +72,43 @@ def verify_message(message: bytes, signature: bytes, public_key: Optional[bytes]
         raise ValueError("ML-DSA public key not provided")
     dsa = MLDSA("ML-DSA-65")
     return dsa.verify(message, signature, public_key)
+
+def verify_peer_key(peer_key: bytes, key_path: str, role: str) -> None:
+    """
+    Trust-On-First-Use (TOFU) check for a peer's public key.
+
+    Args:
+        peer_key: raw bytes of the peer's public key.
+        key_path: directory to store fingerprint.
+        role: "client" or "server" (for file naming)
+    
+    Raises:
+        ProtocolError if key changes on subsequent connections.
+    """
+    # Compute SHA-256 fingerprint
+    fingerprint = hashlib.sha256(peer_key).hexdigest()
+
+    # Ensure secure directory exists
+    key_dir = Path(key_path)
+    key_dir.mkdir(parents=True, exist_ok=True)
+    # Make directory readable/writeable only by owner
+    key_dir.chmod(0o700)
+
+    # Fingerprint file location
+    fp_file = key_dir / f"{role}_peer.fingerprint"
+
+    if fp_file.exists():
+        stored_fp = fp_file.read_text().strip()
+        if stored_fp != fingerprint:
+            raise ValueError(
+                f"Peer {role} key mismatch! Possible MITM attack.\n"
+                f"Expected: {stored_fp}\nGot:      {fingerprint}"
+            )
+    else:
+        # First use: securely write fingerprint
+        # Use os.open with mode 0o600 to set permissions atomically
+        fd = os.open(fp_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(fingerprint)
+        logger.info(f"TOFU: Stored new {role} peer fingerprint {fingerprint}")
+

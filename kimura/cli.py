@@ -4,8 +4,8 @@ import argparse
 import sys
 import logging
 from pathlib import Path
-from session.client import PQCClient
-from session.server import PQCServer
+from session.worker import Worker
+from session.master import Master
 from session.manager import SessionManager
 # Import all keygen functions
 from crypto.keygen import (
@@ -73,7 +73,7 @@ async def main():
         if args.mode == "server":
             if args.persistent:
                 # FIXED: Use SINGLE PQCServer instance
-                server = PQCServer(args.key_path, args.output)
+                server = Master(args.key_path, args.output)
                 await server.serve_forever(port=args.port)
 
             else:
@@ -86,13 +86,13 @@ async def main():
 
         elif args.mode == "client":
             if hasattr(args, 'receive') and args.receive:
-                client = PQCClient(args.key_path)  # No file needed
+                client = Worker(args.key_path)  # No file needed
                 await client.connect_fl(args.host.split(':')[0], int(args.host.split(':')[1]))
                 data = await client.recv_data()    # RECEIVE from server!
                 with open("received_from_server.bin", "wb") as f:
                     f.write(data)
             else:
-                client = PQCClient(args.key_path, args.file)
+                client = Worker(args.key_path, args.file)
                 host_port = args.host.split(":")
                 await client.connect_and_send(host_port[0], int(host_port[1]))
                 logger.info(f"File sent: {args.file}")

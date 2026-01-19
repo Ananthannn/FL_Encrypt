@@ -4,6 +4,8 @@
 import struct
 import sys
 import os
+from typing import Tuple
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from crypto.mlkem import MLKEM           
@@ -19,42 +21,39 @@ from protocol.constants import (
     HEADER_SIZE
 )
 
-def serialize_handshake_init(kem_pk: bytes, client_sig: bytes) -> bytes:  # ADD SIG PARAM
-    kem_id = 1
-    pk_len = len(kem_pk)
-    sig_len = len(client_sig)  # ML-DSA-65 = 2420 bytes typically
-    return (struct.pack('>BHHH', MSG_HANDSHAKE_INIT, kem_id, pk_len, sig_len)  # 1+2+2+2
-            + kem_pk + client_sig)
+import struct
+from protocol.constants import MSG_HANDSHAKE_INIT  # Add this constant
 
-def parse_handshake_init(data: bytes) -> tuple[bytes, bytes]:
-    msg_type, kem_id, pk_len, sig_len = struct.unpack('>BHHH', data[:7])
-    pk_end = 7 + pk_len
-    return data[7:pk_end], data[pk_end:pk_end+sig_len]  # RETURNS (PK, SIG) ✓
+def serialize_handshake_init(version: int, kem_pk: bytes, dsa_pk: bytes, signature: bytes) -> bytes:
+    # Header: msg_type + kem_len + dsa_len + sig_len
+    kem_len = len(kem_pk)
+    dsa_len = len(dsa_pk)
+    sig_len = len(signature)
+    header = struct.pack('>BHHH', MSG_HANDSHAKE_INIT, kem_len, dsa_len, sig_len)
+    return header + kem_pk + dsa_pk + signature
 
-def parse_handshake_init(data: bytes) -> bytes:
-    """Extract KEM public key."""
-    msg_type, kem_id, pk_len = struct.unpack('>BHH', data[:5])
-    return data[5:5+pk_len]
-
-def serialize_handshake_resp(ciphertext: bytes) -> bytes:
-    """Server→Client: [1B type][2B kem_id][2B ct_len][ciphertext]"""
+def serialize_handshake_resp(ciphertext: bytes, dsa_pk: bytes) -> bytes:
     kem_id = 1
     ct_len = len(ciphertext)
-    return struct.pack('>BHH', MSG_HANDSHAKE_RESP, kem_id, ct_len) + ciphertext
+    dsa_len = len(dsa_pk)
+    header = struct.pack('>BHHH', MSG_HANDSHAKE_RESP, kem_id, ct_len, dsa_len)
+    return header + ciphertext + dsa_pk
 
-def parse_handshake_resp(data: bytes) -> bytes:
-    """Extract KEM ciphertext."""
-    msg_type, kem_id, ct_len = struct.unpack('>BHH', data[:5])
-    return data[5:5+ct_len]
+def parse_handshake_init(data: bytes) -> tuple[bytes, bytes, bytes]:
+    msg_type, kem_len, dsa_len, sig_len = struct.unpack('>BHHH', data[:7])
+    kem_pk = data[7:7+kem_len]
+    dsa_pk = data[7+kem_len:7+kem_len+dsa_len]
+    signature = data[7+kem_len+dsa_len:]
+    return kem_pk, dsa_pk, signature  # 3 values!
 
-def derive_session_key(shared_secret: bytes, salt: bytes = b"") -> bytes:
-    """YOUR crypto/kdf.py HKDF!"""
-    return hkdf_sha256(
-        secret=shared_secret,
-        salt=salt, 
-        info=b"pqc_file_transfer_session",
-        length=32  # AES-256
-    )
+def parse_handshake_resp(data: bytes) -> Tuple[bytes, bytes]:
+    if len(data) < 7:
+        raise ValueError("Too short")
+    msg_type, kem_id, ct_len, dsa_len = struct.unpack('>BHHH', data[:7])  # Match serialize!
+    ct = data[7:7+ct_len]
+    dsa_pk = data[7+ct_len:7+ct_len+dsa_len]
+    return ct, dsa_pk
+
 
 def serialize_file_chunk(chunk_data: bytes, aead_ctx: AEADContext) -> bytes:
     """
@@ -82,4 +81,3 @@ def parse_file_chunk(data: bytes, aead_ctx: AEADContext) -> bytes:
     nonce = data[HEADER_SIZE:HEADER_SIZE+NONCE_LEN]
     ciphertext = data[HEADER_SIZE+NONCE_LEN:HEADER_SIZE+NONCE_LEN+chunk_len]
     return aead_ctx.decrypt(ciphertext, nonce)
-
