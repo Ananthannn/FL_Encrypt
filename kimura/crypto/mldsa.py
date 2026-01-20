@@ -2,6 +2,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 import oqs
 import os
+from cryptography.hazmat.primitives import serialization
 from typing import Tuple, Optional
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -68,17 +69,34 @@ class MLDSA:
     def verify(self, message: bytes, signature: bytes, public_key: bytes) -> bool:
         """
         Verify signature against message and public key.
+        Accepts either RAW ML-DSA bytes or PEM-encoded public keys.
         """
+
+        # === 🔹 STEP 1: If it's PEM, convert it to RAW ===
+        if isinstance(public_key, bytes) and b"-----BEGIN" in public_key:
+            try:
+                loaded = serialization.load_pem_public_key(public_key)
+                public_key = loaded.public_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PublicFormat.Raw
+                )
+            except Exception as e:
+                raise ValueError(f"Failed to parse PEM public key: {e}")
+
+        # === 🔹 STEP 2: Now enforce correct length ===
         if len(public_key) != self.length_public_key:
-            raise ValueError("Invalid public key length")
-        
-        sig = oqs.Signature(self.alg)  # <-- NO keys here
+            raise ValueError(
+                f"Invalid public key length: got {len(public_key)}, "
+                f"expected {self.length_public_key}"
+            )
+
+        # === 🔹 STEP 3: Verify ===
+        sig = oqs.Signature(self.alg)
         try:
-            sig.verify(message, signature, public_key)  # public key passed to verify()
+            sig.verify(message, signature, public_key)
             return True
         except oqs.SignatureError:
             return False
-
     
     def hybrid_sign(self, message: bytes, rsa_private_key, pqc_private_key: bytes) -> bytes:
         """

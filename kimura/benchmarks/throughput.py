@@ -10,8 +10,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from protocol.state_machine import StateMachine
-from session.master import PQCMaster
-from session.worker import PQCWorker
+from session.master import Master
+from session.worker import Worker
 
 
 # ─────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ class ThroughputTester:
     async def benchmark_roundtrip(self, iterations: int):
         results = {"client_to_server": [], "total_rounds": 0}
 
-        server = PQCMaster(self.key_path, base_output="/tmp/dummy")
+        server = Master(self.key_path, base_output="/tmp/dummy")
         server_task = asyncio.create_task(self._run_benchmark_server(server))
 
         await asyncio.sleep(3)
@@ -114,7 +114,7 @@ class ThroughputTester:
                 )
 
                 start = time.perf_counter()
-                client = PQCWorker(self.key_path, str(self.test_file))
+                client = Worker(self.key_path, str(self.test_file))
                 await client.connect_and_send("127.0.0.1", 8444)
                 duration = time.perf_counter() - start
 
@@ -148,7 +148,7 @@ class ThroughputTester:
 
         return results
 
-    async def _run_benchmark_server(self, server: PQCWorker):
+    async def _run_benchmark_server(self, server: Worker):
         async def benchmark_handle_client(reader, writer):
             client_id = server.clients_processed
             server.clients_processed += 1

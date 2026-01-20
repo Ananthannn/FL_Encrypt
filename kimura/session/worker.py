@@ -3,7 +3,8 @@ from .manager import SessionManager
 from protocol.constants import DEFAULT_PORT
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-
+import logging
+logger = logging.getLogger(__name__)
 class Worker:
     def __init__(self, key_path: str, file_path: str = None):  # Make file_path optional
         self.key_path = key_path
@@ -11,16 +12,26 @@ class Worker:
         self.mgr = None
         self.on_weights_received = None  # FL callback
         
-    async def connect_and_send(self, host: str, port: int = DEFAULT_PORT):
-        """✅ KEEP EXISTING - file transfer mode"""
+    async def connect_and_send(self, host, port):
         self.mgr = SessionManager("client", self.key_path)
-        try:
-            await self.mgr.establish_channel(host=host, port=port)
-            if self.file_path:
-                await self.mgr.send_file(str(self.file_path))
-        finally:
-            await self.mgr.close()
-    
+
+        # 1) Do handshake ONCE
+        await self.mgr.establish_channel(host=host, port=port)
+
+        # 2) WAIT for server readiness (CRUCIAL)
+        ready = await self.mgr.reader.readexactly(5)
+        if ready != b"READY":
+            raise RuntimeError(f"Server not ready (got: {ready})")
+        logger.info("Server ready, starting file transfer...")
+        # 3) NOW send file
+        if self.file_path:
+            await self.mgr.send_file(str(self.file_path))
+            logger.info(f"File {self.file_path} sent successfully")
+
+        # 4) Graceful close
+        await self.mgr.close()
+        logger.info("Connection closed after file transfer")
+
     # FL PERSISTENT MODE (doesn't close connection)
     async def connect_fl(self, host: str, port: int = DEFAULT_PORT):
         """FL mode: Persistent bidirectional channel"""
