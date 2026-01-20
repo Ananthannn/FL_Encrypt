@@ -20,7 +20,9 @@ from protocol.constants import (
     HEADER_FORMAT,
     HEADER_SIZE
 )
-
+ML_KEM_LEN = 1184   # 96 bytes
+ML_DSA_LEN = 1952         # bytes
+ML_DSA_SIG_LEN = 3309     # bytes
 import struct
 from protocol.constants import MSG_HANDSHAKE_INIT  # Add this constant
 
@@ -40,11 +42,36 @@ def serialize_handshake_resp(ciphertext: bytes, dsa_pk: bytes) -> bytes:
     return header + ciphertext + dsa_pk
 
 def parse_handshake_init(data: bytes) -> tuple[bytes, bytes, bytes]:
-    msg_type, kem_len, dsa_len, sig_len = struct.unpack('>BHHH', data[:7])
+    """
+    Parse handshake init message WITH HEADER.
+    Format:
+    - Header: 1B msg_type + 2B kem_len + 2B dsa_len + 2B sig_len
+    - KEM_pub: kem_len bytes
+    - DSA_pub: dsa_len bytes
+    - signature: sig_len bytes
+    """
+    if len(data) < 7:
+        raise ValueError("Handshake init too short for header")
+
+    # Unpack header
+    msg_type, kem_len, dsa_len, sig_len = struct.unpack(">BHHH", data[:7])
+
+    # Check remaining length
+    if len(data) < 7 + kem_len + dsa_len + sig_len:
+        raise ValueError("Handshake init too short for payload")
+
     kem_pk = data[7:7+kem_len]
     dsa_pk = data[7+kem_len:7+kem_len+dsa_len]
-    signature = data[7+kem_len+dsa_len:]
-    return kem_pk, dsa_pk, signature  # 3 values!
+    signature = data[7+kem_len+dsa_len:7+kem_len+dsa_len+sig_len]
+
+    # Sanity checks
+    assert len(kem_pk) == kem_len
+    assert len(dsa_pk) == dsa_len
+    assert len(signature) == sig_len
+
+    return kem_pk, dsa_pk, signature
+
+
 
 def parse_handshake_resp(data: bytes) -> Tuple[bytes, bytes]:
     if len(data) < 7:

@@ -2,8 +2,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from file_transfer.transfer import send_length_prefixed
-from protocol.messages import serialize_handshake_init
+from file_transfer.transfer import chunked_send_file, recv_file
 from transport.tcp import TCPTransport
 from protocol.state_machine import StateMachine
 import warnings
@@ -29,22 +28,30 @@ class SessionManager:
         self.client_counter = 0
     
     async def establish_channel(self, reader=None, writer=None, host=None, port=DEFAULT_PORT):
-        """Accept pre-connected streams OR connect as client"""
         if self.role == "client":
-            # Client still connects normally
+            # connect normally
             self.reader, self.writer = await self.transport.connect(host or "127.0.0.1", port)
+
+            # SEND handshake & internally process server response
             await self.state_machine.transition("send_handshake", reader=self.reader, writer=self.writer)
-            await self.state_machine.transition("recv_response", reader=self.reader, writer=self.writer)
+
+            # NO need to call recv_response manually; StateMachine already does it
             logger.info(f"{self.role.upper()}: Handshake completed")
+
         else:
-            # SERVER - REQUIRE pre-connected reader/writer from handle_client
+            # SERVER: pre-connected streams
             if not (reader and writer):
                 raise ValueError("Server: must provide reader/writer from handle_client")
             self.reader, self.writer = reader, writer
+
             await self.state_machine.transition("recv_handshake", reader=self.reader, writer=self.writer)
             await self.state_machine.transition("send_response", reader=self.reader, writer=self.writer)
             logger.info(f"{self.role.upper()}: Handshake completed")
+            self.writer.write(b"READY")
+            await self.writer.drain()
+            logger.info(f"{self.role.upper()}: Sent READY signal to client")
         self.ready.set()
+
 
     
     async def _client_handshake(self):
@@ -60,48 +67,30 @@ class SessionManager:
         logger.info(f"{self.role.upper()}: Handshake completed")
 
     async def send_file(self, filepath: str):
-        """Client sends file post-handshake"""
+        """Client sends file post-handshake using chunked AEAD encryption."""
         if not self.state_machine.is_ready_for_transfer():
             raise RuntimeError("Handshake required first")
-        
-        with open(filepath, 'rb') as f:
-            file_data = f.read()
-        
-        filename = Path(filepath).name.encode()
-        filename_len = len(filename)
-        data_len = len(file_data)
-        
-        # Format: filename_len(4) + filename + data_len(8) + data
-        msg = (
-            filename_len.to_bytes(4, 'big') + 
-            filename + 
-            data_len.to_bytes(8, 'big') + 
-            file_data
+        # Use the AEAD send context from the state machine (already created during handshake)
+        await self.state_machine.transition(
+            "start_send_file",
+            reader=self.reader,
+            writer=self.writer,
+            filepath=str(filepath)
         )
-        
-        await self.state_machine.send_protected(self.reader, self.writer, msg)
-        logger.info(f"CLIENT sent {Path(filepath).name} ({len(file_data)/1024/1024:.1f}MB)")
-
+        logger.info(f"CLIENT sent {Path(filepath).name}")
 
     async def recv_file(self, output_path: str):
-        """Server receives file post-handshake using THIS SessionManager's state_machine"""
+        """Server receives file post-handshake using StateMachine wrapper."""
         if not self.state_machine.is_ready_for_transfer():
             raise RuntimeError("Handshake required first")
-        
-        # Receive file using THIS session's reader (not active_clients!)
-        msg = await self.state_machine.recv_protected(self.reader)
-        
-        # Parse: filename_len(4) + filename + data_len(8) + data
-        filename_len = int.from_bytes(msg[:4], 'big')
-        filename = msg[4:4+filename_len].decode()
-        data_offset = 4 + filename_len
-        data_len = int.from_bytes(msg[data_offset:data_offset+8], 'big')
-        file_data = msg[data_offset+8:data_offset+8+data_len]
-        
-        with open(output_path, 'wb') as f:
-            f.write(file_data)
-        logger.info(f"SERVER received {filename} ({len(file_data)/1024/1024:.1f}MB) -> {output_path}")
 
+        await self.state_machine.transition(
+            "start_recv_file",
+            reader=self.reader,
+            writer=self.writer,
+            output_path=str(output_path)
+        )
+        logger.info(f"SERVER received file -> {output_path}")
 
     async def close(self):
         logger.info("SessionManager shutting down")

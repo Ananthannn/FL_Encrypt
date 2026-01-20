@@ -4,6 +4,8 @@ import argparse
 import sys
 import logging
 from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from session.worker import Worker
 from session.master import Master
 from session.manager import SessionManager
@@ -77,12 +79,26 @@ async def main():
                 await server.serve_forever(port=args.port)
 
             else:
-                # Single client fallback
-                mgr = SessionManager("server", args.key_path, args.output)
-                await mgr.establish_channel()
-                await mgr.recv_file(args.output)
-                await mgr.close()
-                logger.info(f"File verified: {args.output}")
+                async def handle_client(reader, writer):
+                    mgr = SessionManager("server", args.key_path, args.output)
+                    try:
+                        await mgr.establish_channel(reader, writer)
+                        await mgr.recv_file(args.output)
+                        logger.info(f"File verified: {args.output}")
+                    except asyncio.IncompleteReadError:
+                        logger.debug("Client disconnected cleanly during session")
+                    finally:
+                        await mgr.close()
+                        writer.close()
+                        await writer.wait_closed()
+                server = await asyncio.start_server(
+                    handle_client,
+                    host="0.0.0.0",
+                    port=args.port
+                )
+                logger.info(f"Server listening on 0.0.0.0:{args.port}")
+                async with server:
+                    await server.serve_forever()
 
         elif args.mode == "client":
             if hasattr(args, 'receive') and args.receive:
