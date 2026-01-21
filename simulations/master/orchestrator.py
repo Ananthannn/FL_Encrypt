@@ -177,7 +177,7 @@ class Orchestrator:
             if st != WorkerState.FAILED
         }
 
-        MIN_WORKERS = 2  # change later if needed
+        MIN_WORKERS = 1 # change later if needed
 
         # Not enough workers → do NOT finalize
         if len(active_workers) < MIN_WORKERS:
