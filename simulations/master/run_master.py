@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 import asyncio
 import logging
-import sys
 from pathlib import Path
-
-# --- PROJECT ROOT ---
-ROOT = Path(__file__).resolve().parents[2]  # FL_Encrypt/
-sys.path.insert(0, str(ROOT))  # <- add this so imports work
-
-output_path = ROOT / "simulations" / "shared" / "received_from_workers.pt"
-output_path.parent.mkdir(parents=True, exist_ok=True)
-
-from kimura.session.master import SecureServer  # your PQC + TCP Master
-from kimura.protocol.constants import DEFAULT_PORT
+import sys
+ROOT = Path(__file__).resolve().parents[2]  # adjust if your script is nested differently
+sys.path.insert(0, str(ROOT))  # now Python can find shared.state etc.
 import warnings
+import numpy as np
+import io
+import json
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from kimura.session.master import SecureServer
+from kimura.protocol.constants import DEFAULT_PORT
+from simulations.master.orchestrator import Orchestrator
+from shared.state import WorkerState
 
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 
@@ -24,17 +26,90 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Paths
+KEY_PATH = ROOT / "simulations" / "keys"
+MODEL_PATH = ROOT / "simulations" / "shared" / "model.npz"
+RECEIVED_DIR = ROOT / "simulations" / "shared"
+RECEIVED_DIR.mkdir(parents=True, exist_ok=True)
+STATE_PATH = RECEIVED_DIR / "master_state.json"
+
 async def main():
-    # ---- CONFIG ----
-    key_path = ROOT / "simulations" / "keys"  # absolute path to your keys
-    output_path = ROOT / "simulations" / "shared" / "received_from_workers.pt"
+    # ---- CREATE SERVER ----
+    server = SecureServer(str(KEY_PATH), base_output=str(RECEIVED_DIR))
 
-    # ---- CREATE MASTER INSTANCE ----
-    master = SecureServer(str(key_path), base_output=str(output_path))
-    logger.info("Master booting... waiting for workers to connect")
+    # ---- CREATE ORCHESTRATOR ----
+    orchestrator = Orchestrator(server=server, state_path=STATE_PATH)
 
-    # ---- START SERVER TUNNEL ----
-    await master.serve_forever(port=DEFAULT_PORT)
+    # ---- CALLBACK: Worker connected ----
+    async def on_worker_connected(worker_id):
+        worker_id = str(worker_id)  # ensure string key
+        # 1️⃣ Register handshake in orchestrator
+        orchestrator.workers[worker_id] = WorkerState.HANDSHAKE_DONE
+        orchestrator._save_state()
+        logger.info(f"Worker {worker_id} connected and handshake complete")
+
+        # 2️⃣ Mark worker as active in server so updates are accepted
+        if not hasattr(server, "active_clients"):
+            server.active_clients = {}  # fallback if not defined
+        server.active_clients[worker_id] = True
+
+        # 3️⃣ Send initial model
+        if MODEL_PATH.exists():
+            logger.info(f"Sending initial model to Client #{worker_id}")
+            await server.send_file(worker_id, str(MODEL_PATH))
+        else:
+            logger.error(f"Model file {MODEL_PATH} not found!")
+
+
+    # ---- CALLBACK: Receive updates ----
+    async def on_result_received(client_id, data_bytes):
+        client_id = str(client_id)  # ensure string key
+
+        # Reject if handshake not complete
+        if client_id not in orchestrator.workers or orchestrator.workers[client_id] != WorkerState.HANDSHAKE_DONE:
+            logger.error(f"Client #{client_id} sent result before handshake!")
+            return
+
+        # Decode JSON payload
+        payload = json.loads(data_bytes)
+        round_no = payload["round_no"]
+        weights = bytes.fromhex(payload["weights"])
+
+        # Save update to disk
+        out_path = RECEIVED_DIR / f"worker_{client_id}_update_round{round_no}.npz"
+        with open(out_path, "wb") as f:
+            f.write(weights)
+        logger.info(f"Saved update from Client #{client_id} for round {round_no} to {out_path}")
+
+        # Tell orchestrator the result arrived
+        await orchestrator.receive_result(client_id, weights, round_no)
+
+        # Check if all results received before aggregation
+        if orchestrator.all_results_received():
+            # Aggregate updates
+            updates = []
+            for f in RECEIVED_DIR.glob(f"worker_*_update_round{round_no}.npz"):
+                arr = np.load(f, allow_pickle=True)
+                updates.append({k: arr[k] for k in arr.files})
+
+            if updates:
+                keys = updates[0].keys()
+                avg_update = {k: sum(u[k] for u in updates) / len(updates) for k in keys}
+
+                # Serialize and broadcast
+                buf = io.BytesIO()
+                np.savez(buf, **avg_update)
+                buf.seek(0)
+                await server.broadcast_weights(buf.getvalue())
+                logger.info(f"Broadcasted averaged weights for round {round_no} to all clients")
+
+
+    # Hook callbacks
+    server.on_worker_connected = on_worker_connected
+    server.on_result_received = on_result_received
+
+    logger.info("Master booting... waiting for workers")
+    await orchestrator.run(port=DEFAULT_PORT)
 
 if __name__ == "__main__":
     try:
