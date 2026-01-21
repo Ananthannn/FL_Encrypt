@@ -43,22 +43,11 @@ async def main():
     # ---- CALLBACK: Worker connected ----
     async def on_worker_connected(worker_id):
         worker_id = str(worker_id)  # ensure string key
-        # 1️⃣ Register handshake in orchestrator
+        # Register worker in orchestrator after successful handshake
         orchestrator.workers[worker_id] = WorkerState.HANDSHAKE_DONE
         orchestrator._save_state()
         logger.info(f"Worker {worker_id} connected and handshake complete")
-
-        # 2️⃣ Mark worker as active in server so updates are accepted
-        if not hasattr(server, "active_clients"):
-            server.active_clients = {}  # fallback if not defined
-        server.active_clients[worker_id] = True
-
-        # 3️⃣ Send initial model
-        if MODEL_PATH.exists():
-            logger.info(f"Sending initial model to Client #{worker_id}")
-            await server.send_file(worker_id, str(MODEL_PATH))
-        else:
-            logger.error(f"Model file {MODEL_PATH} not found!")
+        # Note: model is sent inline in master.py handle_client(), not here
 
 
     # ---- CALLBACK: Receive updates ----
