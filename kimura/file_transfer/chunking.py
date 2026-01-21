@@ -8,7 +8,7 @@ import os
 import hashlib
 from typing import Iterator, List, Tuple, NamedTuple, Union
 from pathlib import Path
-from protocol.constants import MAX_CHUNK_SIZE
+from kimura.protocol.constants import MAX_CHUNK_SIZE
 # Forward reference for your AEADContext (no import needed)
 from typing import ForwardRef
 AEADContext = ForwardRef("AEADContext")

@@ -1,11 +1,11 @@
 import asyncio
-from .manager import SessionManager
-from protocol.constants import DEFAULT_PORT
+from kimura.session.manager import SessionManager
+from kimura.protocol.constants import DEFAULT_PORT
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 import logging
 logger = logging.getLogger(__name__)
-class Worker:
+class SecureClient:
     def __init__(self, key_path: str, file_path: str = None):  # Make file_path optional
         self.key_path = key_path
         self.file_path = file_path

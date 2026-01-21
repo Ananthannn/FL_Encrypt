@@ -1,8 +1,8 @@
 import asyncio
 import logging
 from pathlib import Path
-from session.manager import SessionManager
-from protocol.constants import DEFAULT_PORT
+from kimura.session.manager import SessionManager
+from kimura.protocol.constants import DEFAULT_PORT
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class Master:
+class SecureServer:
     def __init__(self, key_path: str, base_output: str = None):
         self.key_path = Path(key_path)
         self.base_output = Path(base_output) if base_output else None
@@ -47,7 +47,7 @@ class Master:
             logger.info(f"Client #{client_id}: Handshake COMPLETED ✅")
             
             # ✅ Now receive file
-            output_file = f"{self.base_output.stem}_client{client_id}.bin"
+            output_file = self.base_output.parent / f"{self.base_output.stem}_worker{client_id}.pt"
             await mgr.recv_file(output_file)
             
         except asyncio.IncompleteReadError:

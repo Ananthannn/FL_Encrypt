@@ -5,18 +5,18 @@ import os
 import hashlib
 import sys
 from pathlib import Path
-from transport.tcp import TCPTransport
-from protocol.constants import ML_DSA_65_SIG_LEN, PROTOCOL_VERSION
-from file_transfer.transfer import chunked_send_file, recv_file
+from kimura.transport.tcp import TCPTransport
+from kimura.protocol.constants import ML_DSA_65_SIG_LEN, PROTOCOL_VERSION
+from kimura.file_transfer.transfer import chunked_send_file, recv_file
 # Fix imports for YOUR project structure
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-from crypto.kdf import hkdf_sha256
+from kimura.crypto.kdf import hkdf_sha256
 from crypto.aead import AEADContext
-from crypto.mlkem import MLKEM
-from protocol.messages import (
+from kimura.crypto.mlkem import MLKEM
+from kimura.protocol.messages import (
     serialize_handshake_init, 
     parse_handshake_resp,
     serialize_handshake_resp,
