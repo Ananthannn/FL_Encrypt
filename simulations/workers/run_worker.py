@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     # ---- CONFIG ----
-    key_path = ROOT / "kimura" / "keys"  # path to your PQC keys
+    key_path = ROOT / "simulations" / "keys"  # path to your PQC keys
     file_to_send = ROOT / "simulations" / "shared" / "new_file.bin"
     master_host = "127.0.0.1"
     master_port = DEFAULT_PORT

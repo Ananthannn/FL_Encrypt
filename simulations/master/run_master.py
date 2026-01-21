@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     # ---- CONFIG ----
-    key_path = ROOT / "kimura" / "keys"  # absolute path to your keys
+    key_path = ROOT / "simulations" / "keys"  # absolute path to your keys
     output_path = ROOT / "simulations" / "shared" / "received_from_workers.pt"
 
     # ---- CREATE MASTER INSTANCE ----
