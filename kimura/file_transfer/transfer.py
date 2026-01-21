@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 # Fix imports for project structure
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.dirname(__file__))  # file_transfer/
-from crypto.aead import AEADContext
-from file_transfer.chunking import chunk_file_for_encryption, ChunkMetadata, verify_chunk_integrity
-from file_transfer.bytes_conversion import format_file_size, get_file_size
+from kimura.crypto.aead import AEADContext
+from kimura.file_transfer.chunking import chunk_file_for_encryption, ChunkMetadata, verify_chunk_integrity
+from kimura.file_transfer.bytes_conversion import format_file_size, get_file_size
 
 
 async def send_length_prefixed(writer: asyncio.StreamWriter, data: bytes) -> None:

@@ -1,8 +1,8 @@
 # crypto/keygen.py
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-from crypto.mlkem import MLKEM
-from crypto.mldsa import MLDSA
+from kimura.crypto.mlkem import MLKEM
+from kimura.crypto.mldsa import MLDSA
 from pathlib import Path
 
 

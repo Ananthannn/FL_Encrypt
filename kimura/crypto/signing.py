@@ -1,7 +1,7 @@
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-from crypto.mldsa import MLDSA
-from crypto.keygen import (
+from kimura.crypto.mldsa import MLDSA
+from kimura.crypto.keygen import (
     generate_mlkem_server_keys, generate_mlkem_client_keys,
     generate_mldsa_server_keys, generate_mldsa_client_keys,
     load_mlkem_server_keys, load_mlkem_client_keys,
