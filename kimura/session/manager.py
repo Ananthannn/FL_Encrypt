@@ -2,9 +2,9 @@
 import asyncio
 import logging
 from pathlib import Path
-from file_transfer.transfer import chunked_send_file, recv_file
-from transport.tcp import TCPTransport
-from protocol.state_machine import StateMachine
+from kimura.file_transfer.transfer import chunked_send_file, recv_file
+from kimura.transport.tcp import TCPTransport
+from kimura.protocol.state_machine import StateMachine
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 from protocol.constants import DEFAULT_PORT

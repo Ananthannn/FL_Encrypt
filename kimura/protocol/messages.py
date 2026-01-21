@@ -8,10 +8,10 @@ from typing import Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from crypto.mlkem import MLKEM           
-from crypto.kdf import hkdf_sha256      
-from crypto.aead import AEADContext    
-from protocol.constants import (
+from kimura.crypto.mlkem import MLKEM           
+from kimura.crypto.kdf import hkdf_sha256      
+from kimura.crypto.aead import AEADContext    
+from kimura.protocol.constants import (
     MSG_HANDSHAKE_INIT,
     MSG_HANDSHAKE_RESP,
     MSG_FILE_CHUNK,
@@ -24,7 +24,7 @@ ML_KEM_LEN = 1184   # 96 bytes
 ML_DSA_LEN = 1952         # bytes
 ML_DSA_SIG_LEN = 3309     # bytes
 import struct
-from protocol.constants import MSG_HANDSHAKE_INIT  # Add this constant
+from kimura.protocol.constants import MSG_HANDSHAKE_INIT  # Add this constant
 
 def serialize_handshake_init(version: int, kem_pk: bytes, dsa_pk: bytes, signature: bytes) -> bytes:
     # Header: msg_type + kem_len + dsa_len + sig_len

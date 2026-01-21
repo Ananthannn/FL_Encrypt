@@ -3,8 +3,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 import oqs
 import os
 import sys
-from crypto import aead
-from crypto.aead import AEADContext
+from kimura.crypto import aead
+from kimura.crypto.aead import AEADContext
 from typing import Tuple, Optional, Union
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 

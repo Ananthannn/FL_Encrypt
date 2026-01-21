@@ -1,0 +1,13 @@
+{
+  "round": 0,
+  "expected_workers": ["worker1", "worker2", "worker3", "worker4"],
+  "workers_received": {},
+  "latest_global_model": "shared/global_model.pt",
+  "aggregation_method": "fedavg",
+  "hyperparameters": {
+    "learning_rate": 0.001,
+    "batch_size": 32,
+    "epochs_per_round": 1
+  },
+  "history": []
+}
