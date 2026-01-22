@@ -1,64 +1,123 @@
+#!/usr/bin/env python3
 import asyncio
+import logging
+from pathlib import Path
 from kimura.session.manager import SessionManager
 from kimura.protocol.constants import DEFAULT_PORT
 import warnings
+import json
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-import logging
 logger = logging.getLogger(__name__)
+
+
 class SecureClient:
-    def __init__(self, key_path: str, file_path: str = None):  # Make file_path optional
+    def __init__(self, key_path: str):
+        """
+        FL Client: persistent bidirectional channel
+        key_path: directory with PQC keys
+        """
         self.key_path = key_path
-        self.file_path = file_path
-        self.mgr = None
-        self.on_weights_received = None  # FL callback
-        
-    async def connect_and_send(self, host, port):
+        self.weights_callback: callable | None = None
+        self.mgr: SessionManager | None = None
+        self.on_weights_received = None  # callback for FL loop
+
+    # -----------------------------
+    # Persistent FL Connection
+    # -----------------------------
+    async def connect_fl(self, host: str, port: int = DEFAULT_PORT, initial_model_path: str = "model.npz"):
+        """
+        Connect to master, receive initial model, send first update, then start FL loop.
+        """
         self.mgr = SessionManager("client", self.key_path)
 
-        # 1) Do handshake ONCE
+        # 1️⃣ Secure handshake
         await self.mgr.establish_channel(host=host, port=port)
+        logger.info("Handshake complete with server")
 
-        # 2) WAIT for server readiness (CRUCIAL)
-        ready = await self.mgr.reader.readexactly(5)
-        if ready != b"READY":
-            raise RuntimeError(f"Server not ready (got: {ready})")
-        logger.info("Server ready, starting file transfer...")
-        # 3) NOW send file
-        if self.file_path:
-            await self.mgr.send_file(str(self.file_path))
-            logger.info(f"File {self.file_path} sent successfully")
+        # 2️⃣ Receive initial model (FILE)
+        logger.info("WORKER: waiting for initial model")
+        await self.mgr.recv_file(initial_model_path)
+        logger.info(f"WORKER: initial model received: {initial_model_path}")
 
-        # 4) Graceful close
-        await self.mgr.close()
-        logger.info("Connection closed after file transfer")
+        # 3️⃣ Train ONCE immediately
+        if not self.weights_callback:
+            raise RuntimeError("Weights callback not set!")
+        logger.info("WORKER: training initial model")
+        updated_bytes = await self.weights_callback(
+            Path(initial_model_path).read_bytes()
+        )
 
-    # FL PERSISTENT MODE (doesn't close connection)
-    async def connect_fl(self, host: str, port: int = DEFAULT_PORT):
-        """FL mode: Persistent bidirectional channel"""
-        self.mgr = SessionManager("client", self.key_path)
-        await self.mgr.establish_channel(host=host, port=port)
-        
-        # Start FL loop in background
-        asyncio.create_task(self._fl_loop())
+        # 4️⃣ SEND FIRST UPDATE (THIS WAS MISSING)
+        logger.info("WORKER: sending initial update to master")
+        await self._send_update_json(updated_bytes, round_no=0)
+        # 5️⃣ NOW enter persistent loop
+        await self._fl_loop()
+
+    async def _send_update_json(self, weights: bytes, round_no: int):
+        """
+        Wrap weights in JSON with round_no and send.
+        """
+        if not self.mgr:
+            raise RuntimeError("SessionManager not initialized")
+
+        payload = {
+            "round_no": round_no,
+            "weights": weights.hex()
+        }
+        await self.mgr.send_data(json.dumps(payload).encode())
+        logger.info(f"WORKER: Sent {len(weights)/1024/1024:.3f} MB for round {round_no}")
     
+    # -----------------------------
+    # Send updated gradients / weights
+    # -----------------------------
     async def send_weights(self, weights: bytes):
-        """NEW: Send weights over existing channel"""
+        """
+        Send local training updates back to the server.
+        """
         if self.mgr:
-            # You'll add this to SessionManager later
             await self.mgr.send_data(weights)
-    
-    def set_weights_callback(self, callback):
-        """Callback when server sends weights"""
-        self.on_weights_received = callback
-    
+            logger.info(f"Sent {len(weights)/1024:.1f} KB of gradients to server")
+
+    # -----------------------------
+    # Register callback for server updates
+    # -----------------------------
+    def set_weights_callback(self, callback: callable):
+        """
+        Set callback for handling received server weights.
+        callback should be async and accept bytes -> returns bytes
+        """
+        self.weights_callback = callback
+
+    # -----------------------------
+    # Internal FL loop
+    # -----------------------------
     async def _fl_loop(self):
-        """Internal FL bidirectional loop"""
+        """
+        Handles FL rounds AFTER round-0.
+        Server always sends first here.
+        """
+        if not self.mgr:
+            raise RuntimeError("FL connection not established")
+
         while True:
             try:
-                # Receive from server
-                weights = await self.mgr.recv_data()  # You'll add this
+                logger.info("WORKER: waiting for aggregated weights")
+                server_weights = await self.mgr.recv_data()
+
                 if self.on_weights_received:
-                    trained = await self.on_weights_received(weights)
-                    await self.send_weights(trained)
-            except:
+                    updated_weights = await self.on_weights_received(server_weights)
+
+                    logger.info("WORKER: sending updated weights")
+                    if not hasattr(self, "_current_round"):
+                        self._current_round = 1  # round-0 already sent
+
+                    await self._send_update_json(updated_weights, round_no=self._current_round)
+                    self._current_round += 1
+
+            except asyncio.IncompleteReadError:
+                logger.warning("Server closed connection")
                 break
+            except Exception as e:
+                logger.error(f"FL loop error: {e}")
+                break
+

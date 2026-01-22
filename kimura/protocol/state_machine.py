@@ -64,7 +64,9 @@ class StateMachine:
         self.ml_dsa_public_key: Optional[bytes] = None
         self.ml_dsa_secret_key: Optional[bytes] = None
         self.signing_key: Optional[bytes] = None
+        self.handshake_done = False
         self.peer_kem_public_key: Optional[bytes] = None  
+        self.writer_active = False  # tracks if handshake completed and writer ready
         self.peer_ml_dsa_public_key: Optional[bytes] = None
         ensure_keys_exist(key_path, role)
         if role == "server":
@@ -100,6 +102,14 @@ class StateMachine:
 
         # 4. Initialize KEM
         self.kem = MLKEM("ML-KEM-768")
+    def get_peer_identity_key(self) -> bytes:
+        """
+        Returns the verified peer ML-DSA public key.
+        Safe ONLY after handshake completes.
+        """
+        if self.peer_ml_dsa_public_key is None:
+            raise RuntimeError("Peer identity key requested before handshake completion")
+        return self.peer_ml_dsa_public_key
 
     async def transition(self, event: str, reader=None, writer=None, **kwargs) -> None:
         logger.debug(f"[{self.role.upper()}] {self.state.name} → {event}")
@@ -127,7 +137,7 @@ class StateMachine:
             self._error(f"Invalid transition: {self.state.name} + {event}")
             return
         await transitions[self.state][event](reader, writer, **kwargs)
-        logger.info(f"[{self.role}] {self.state.name} --[{event}]--> Writer.active={writer.is_closing() if writer else 'no'}")
+        logger.info(f"[{self.role}] {self.state.name} --[{event}]--> writer_active={self.writer_active}")
 
     async def _client_send_handshake(self, reader, writer, **kwargs):
         if self.state != TransferState.INIT:
@@ -192,6 +202,8 @@ class StateMachine:
         self.session_key = transcript_hash
         self.peer_ml_dsa_public_key = server_dsa_pk
         self.state = TransferState.HANDSHAKE_COMPLETE
+        self.writer_active=True
+        self.handshake_done = True
         logger.info(f"[CLIENT] Derived AEAD keys, session_key: {self.session_key.hex()[:16]}")
         logger.info(f"[CLIENT] AEAD send_seq={self.aead_ctx.send_seq}, recv_seq={self.aead_ctx.recv_seq}")
 
@@ -274,6 +286,8 @@ class StateMachine:
         self.aead_ctx = AEADPair(send_ctx, recv_ctx)
         self.session_key = transcript_hash
         self.state = TransferState.HANDSHAKE_COMPLETE
+        self.writer_active = True
+        self.handshake_done = True 
         logger.info(f"[SERVER] AEAD keys derived, session_key: {self.session_key.hex()[:16]}")
         logger.info(f"[SERVER] AEAD send_seq={self.aead_ctx.send_seq}, recv_seq={self.aead_ctx.recv_seq}")
         logger.info(f"[SERVER] State updated to {self.state.name}")
@@ -318,6 +332,7 @@ class StateMachine:
         self.session_key = transcript_hash
         self.peer_ml_dsa_public_key = server_dsa_pk
         self.state = TransferState.HANDSHAKE_COMPLETE
+        self.writer_active = True
         logger.info(f"[CLIENT] Derived AEAD keys, session_key: {self.session_key.hex()[:16]}")
         logger.info(f"[CLIENT] AEAD send_seq={self.aead_ctx.send_seq}, recv_seq={self.aead_ctx.recv_seq}")
         logger.info(f"[CLIENT] State updated to {self.state.name}")
@@ -330,8 +345,9 @@ class StateMachine:
         raise ProtocolError(reason)
 
     def is_ready_for_transfer(self) -> bool:
-        return self.state == TransferState.HANDSHAKE_COMPLETE and self.aead_ctx is not None
-    
+        # Only allow sending if handshake complete AND writer is active
+        return self.state == TransferState.HANDSHAKE_COMPLETE and self.aead_ctx is not None and self.writer_active
+        
     def get_aead_context(self) -> AEADPair:
         if not self.aead_ctx:
             self._error("AEAD context not initialized")
@@ -339,8 +355,8 @@ class StateMachine:
     
     async def send_protected(self, reader, writer, payload: bytes):
         """ALL post-handshake sends go through this"""
-        if self.state != TransferState.HANDSHAKE_COMPLETE or not self.aead_ctx:
-            raise ProtocolError(f"State {self.state.name}, AEAD: {self.aead_ctx is not None}")
+        if not self.is_ready_for_protected():
+            raise ProtocolError("Handshake required first")
         seq = self.aead_ctx.send_seq.to_bytes(8, 'big')
         self.aead_ctx.send_seq += 1
         nonce = hkdf_sha256(seq, self.session_key , b"nonce", 12)
@@ -348,7 +364,7 @@ class StateMachine:
         msg = seq + nonce + encrypted 
         await send_length_prefixed(writer, msg)
 
-    async def recv_protected(self, reader) -> bytes:
+    async def recv_protected(self, reader, writer=None) -> bytes:
         """ALL post-handshake receives go through this"""
         if self.state != TransferState.HANDSHAKE_COMPLETE or not self.aead_ctx:
             raise ProtocolError("Handshake required")
@@ -383,5 +399,12 @@ class StateMachine:
             output_path=Path(output_path),
             aead_ctx=self.aead_ctx.recv_ctx
         )
+        # For AEAD sends (broadcast_weights, send_data)
+    def is_ready_for_protected(self):
+        return self.handshake_done and self.aead_ctx is not None
+
+    # For file transfers
+    def is_ready_for_file_transfer(self):
+        return self.handshake_done and self.aead_ctx is not None and self.writer_active
 
 

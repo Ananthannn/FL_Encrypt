@@ -2,46 +2,50 @@
 import asyncio
 import logging
 from pathlib import Path
+import warnings
+import numpy as np
+import io
 import sys
 
-# --- PROJECT ROOT ---
-ROOT = Path(__file__).resolve().parents[2]  # points to FL_Encrypt/
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+
+warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from kimura.session.worker import SecureClient
 from kimura.protocol.constants import DEFAULT_PORT
-import warnings
 
-warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
+async def fake_training(weights_bytes: bytes) -> bytes:
+    # Load model
+    buffer = io.BytesIO(weights_bytes)
+    arr = np.load(buffer, allow_pickle=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)-8s %(name)s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+    # Perform fake "training"
+    updated = {k: arr[k] * 1.01 for k in arr.files}
+
+    # Serialize back
+    out = io.BytesIO()
+    np.savez(out, **updated)
+    
+    # Reset pointer to start BEFORE sending
+    out.seek(0)
+    
+    return out.getvalue()
+
 
 async def main():
-    # ---- CONFIG ----
-    key_path = ROOT / "simulations" / "keys"  # path to your PQC keys
-    file_to_send = ROOT / "simulations" / "shared" / "new_file.bin"
+    key_path = ROOT / "simulations" / "keys"
     master_host = "127.0.0.1"
     master_port = DEFAULT_PORT
+    initial_model_path = ROOT / "simulations" / "shared" / "model.npz"
 
-    if not file_to_send.exists():
-        logger.error(f"File not found: {file_to_send}")
-        return
+    client = SecureClient(str(key_path))
+    client.set_weights_callback(fake_training)
 
-    # ---- CREATE CLIENT INSTANCE ----
-    client = SecureClient(str(key_path), str(file_to_send))
-
-    # ---- CONNECT TO MASTER AND SEND ----
-    logger.info(f"Connecting to master at {master_host}:{master_port}")
-    try:
-        await client.connect_and_send(master_host, master_port)
-        logger.info(f"File sent successfully: {file_to_send}")
-    except Exception as e:
-        logger.error(f"Failed to send file: {e}")
+    # Connect and start FL loop
+    await client.connect_fl(master_host, master_port, initial_model_path=str(initial_model_path))
 
 if __name__ == "__main__":
     try:
