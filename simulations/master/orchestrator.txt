@@ -1,8 +1,0 @@
-__init__()	Initialize server, load keys, configure logging	Master state = INIT
-accept_worker()	Accept TCP connections from workers	Per-worker state = INIT → HANDSHAKE_SENT
-handshake_worker(worker_conn)	Run StateMachine handshake	Per-worker state = HANDSHAKE_COMPLETE
-dispatch_task(worker_conn, task)	Send model/data to worker	State = DATA_SENT
-collect_result(worker_conn)	Receive results from worker	State = RESULT_RECEIVED
-aggregate_results()	Call aggregator.py to merge updates	Master state = RESULTS_AGGREGATED
-error_handler(worker_conn, exception)	Retry / log errors	State = ERROR
-shutdown()	Close connections safely	Master state = SHUTDOWN
