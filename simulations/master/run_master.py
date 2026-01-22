@@ -42,7 +42,7 @@ async def main():
 
     # ---- CALLBACK: Worker connected ----
     async def on_worker_connected(worker_id):
-        worker_id = str(worker_id)  # ensure string key
+        # worker_id is already a string from handshake (derived from pubkey hash)
         # Register worker in orchestrator after successful handshake
         orchestrator.workers[worker_id] = WorkerState.HANDSHAKE_DONE
         orchestrator._save_state()
@@ -52,11 +52,10 @@ async def main():
 
     # ---- CALLBACK: Receive updates ----
     async def on_result_received(client_id, data_bytes):
-        client_id = str(client_id)  # ensure string key
-
+        # client_id is worker_id (string) from handshake
         # Reject if handshake not complete
         if client_id not in orchestrator.workers or orchestrator.workers[client_id] != WorkerState.HANDSHAKE_DONE:
-            logger.error(f"Client #{client_id} sent result before handshake!")
+            logger.error(f"Worker {client_id} sent result before handshake!")
             return
 
         # Decode JSON payload
@@ -68,7 +67,7 @@ async def main():
         out_path = RECEIVED_DIR / f"worker_{client_id}_update_round{round_no}.npz"
         with open(out_path, "wb") as f:
             f.write(weights)
-        logger.info(f"Saved update from Client #{client_id} for round {round_no} to {out_path}")
+        logger.info(f"Saved update from Worker {client_id} for round {round_no} to {out_path}")
 
         # Tell orchestrator the result arrived
         await orchestrator.receive_result(client_id, weights, round_no)
