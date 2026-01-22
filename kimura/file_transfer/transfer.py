@@ -28,6 +28,7 @@ async def send_length_prefixed(writer: asyncio.StreamWriter, data: bytes) -> Non
 async def recv_length_prefixed(reader: asyncio.StreamReader) -> bytes:
     length_data = await reader.readexactly(4)
     length = struct.unpack('>I', length_data)[0]
+    logger.debug(f"recv_length_prefixed: expecting {length} bytes, got prefix {length_data.hex()}")
     data = await reader.readexactly(length)
     return data
 

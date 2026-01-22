@@ -1,0 +1,11 @@
+{
+  "round": 0,
+  "workers": {
+    "1": "RESULT_RECEIVED",
+    "3": "RESULT_RECEIVED"
+  },
+  "results_received": [
+    "1",
+    "3"
+  ]
+}
