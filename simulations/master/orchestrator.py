@@ -23,7 +23,7 @@ logger = logging.getLogger("orchestrator")
 # ORCHESTRATOR CORE
 # ============================================================
 class Orchestrator:
-    def __init__(self, server, state_path: Path | None = None):
+    def __init__(self, server, state_path: Path | None = None, model_path: Path | None = None):
         """
         Args:
             server: SecureServer instance (crypto + TCP already inside)
@@ -33,8 +33,8 @@ class Orchestrator:
 
         self.workers: Dict[str, WorkerState] = {}
         self.results: Dict[str, bytes] = {}
-
         self.round: int = 0
+        self.model_path = model_path
 
         self.state_path = state_path
         if self.state_path:
@@ -42,7 +42,6 @@ class Orchestrator:
             self._load_state()
 
         logger.info("Orchestrator initialized")
-
 
     # ========================================================
     # STATE MANAGEMENT
@@ -70,19 +69,24 @@ class Orchestrator:
 
         self.state_path.write_text(json.dumps(state, indent=2))
 
-
     # ========================================================
     # WORKER CONNECTION PHASE
     # ========================================================
     async def on_worker_connected(self, worker_id: str) -> None:
+        """
+        Called immediately after a worker completes handshake.
+        Marks the worker as connected and handshake done.
+        Do NOT send the initial model/task here — wait for READY signal.
+        """
         if worker_id not in self.workers:
             self.workers[worker_id] = WorkerState.CONNECTED
             self._save_state()
 
         self.workers[worker_id] = WorkerState.HANDSHAKE_DONE
         self._save_state()
-
         logger.info(f"Worker {worker_id} connected and handshake complete")
+
+
 
     # ========================================================
     # TASK ORCHESTRATION
@@ -193,8 +197,49 @@ class Orchestrator:
             for st in active_workers.values()
         )
 
+    # ========================================================
+    # EXPLICIT TRAINING CONTROL (CORE FIX)
+    # ========================================================
+    async def start_training(self, rounds: int, min_workers: int) -> None:
+        ready_workers = [
+            wid for wid, st in self.workers.items()
+            if st == WorkerState.HANDSHAKE_DONE
+        ]
 
+        if len(ready_workers) < min_workers:
+            raise RuntimeError(
+                f"Not enough workers ({len(ready_workers)}/{min_workers})"
+            )
 
+        logger.info(
+            f"Starting training: rounds={rounds}, workers={len(ready_workers)}"
+        )
+
+        for r in range(rounds):
+            self.round = r
+            self.results.clear()
+            await self.start_round(r)
+
+    async def start_round(self, round_no: int) -> None:
+        logger.info(f"Round {round_no} starting")
+        for worker_id in self.workers:
+            if self.workers[worker_id] == WorkerState.HANDSHAKE_DONE:
+                payload = self.prepare_task_for(worker_id, round_no)
+                await self.server.send_to_worker(worker_id, payload)
+                self.workers[worker_id] = WorkerState.TASK_SENT
+        self._save_state()
+
+    def prepare_task_for(self, worker_id: str, round_no: int) -> bytes:
+        """
+        Prepare task payload for a specific worker.
+        This is a placeholder and should be customized.
+        """
+        task = {
+            "round": round_no,
+            "task_data": f"Task for worker {worker_id} in round {round_no}"
+        }
+        return json.dumps(task).encode('utf-8')
+    
     # ========================================================
     # AGGREGATION
     # ========================================================
@@ -227,10 +272,23 @@ class Orchestrator:
 
     async def on_worker_ready(self, worker_id: str, msg: bytes) -> None:
         logger.info(f"Worker {worker_id} ready with message: {msg}")
-        payload = self.prepare_task_for(worker_id)  # implement this
-        await self.server.send_to_client(worker_id, payload)
-        self.workers[worker_id] = WorkerState.TRAINING
-        self._save_state()
+        try:
+            if not self.model_path or not self.model_path.exists():
+                raise FileNotFoundError(f"Initial model not found: {self.model_path}")
+
+            # Keep worker in HANDSHAKE_DONE while sending initial model
+            await self.server.send_file(worker_id, self.model_path)
+            logger.info(f"Initial model sent to worker {worker_id} via send_file()")
+
+            # Do NOT mark TASK_SENT here; only mark TASK_SENT when you actually send a training payload in start_round
+            # self.workers[worker_id] = WorkerState.TASK_SENT  <-- remove this line
+
+            self._save_state()  # Still save state if needed
+
+        except Exception as e:
+            logger.error(f"Failed to send initial model to {worker_id}: {e}")
+            self.workers[worker_id] = WorkerState.FAILED
+            self._save_state()
 
     # ========================================================
     # MAIN EVENT LOOP

@@ -3,22 +3,18 @@ import asyncio
 import logging
 from pathlib import Path
 import sys
+
 ROOT = Path(__file__).resolve().parents[2]  # adjust if your script is nested differently
 sys.path.insert(0, str(ROOT))  # now Python can find shared.state etc.
 import warnings
 import numpy as np
 import io
 import json
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
-
 from kimura.session.master import SecureServer
 from kimura.protocol.constants import DEFAULT_PORT
-from simulations.master.orchestrator import Orchestrator
+from orchestrator import Orchestrator
 from shared.state import WorkerState
-
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)-8s %(name)s %(message)s',
@@ -38,24 +34,41 @@ async def main():
     server = SecureServer(str(KEY_PATH), base_output=str(RECEIVED_DIR))
 
     # ---- CREATE ORCHESTRATOR ----
-    orchestrator = Orchestrator(server=server, state_path=STATE_PATH)
+    orchestrator = Orchestrator(
+        server=server,
+        state_path=STATE_PATH,
+        model_path=MODEL_PATH
+    )
+    # ---- STATUS PRINTING ----
+    def print_status():
+        num_workers = len(orchestrator.workers)
 
-    # ---- CALLBACK: Worker connected ----
-    async def on_worker_connected(worker_id):
-        # worker_id is already a string from handshake (derived from pubkey hash)
-        # Register worker in orchestrator after successful handshake
-        orchestrator.workers[worker_id] = WorkerState.HANDSHAKE_DONE
-        orchestrator._save_state()
-        logger.info(f"Worker {worker_id} connected and handshake complete")
-        # Note: model is sent inline in master.py handle_client(), not here
+        if not orchestrator.workers:
+            state = "IDLE"
+        elif any(st == WorkerState.HANDSHAKE_DONE for st in orchestrator.workers.values()):
+            # Workers are ready but haven't started training
+            state = "WAITING_FOR_TASK"
+        elif any(st in (WorkerState.TASK_SENT, WorkerState.TRAINING) for st in orchestrator.workers.values()):
+            state = "ROUND_IN_PROGRESS"
+        elif orchestrator.all_results_received():
+            state = "AGGREGATING"
+        elif any(st == WorkerState.RESULT_RECEIVED for st in orchestrator.workers.values()):
+            state = "AGGREGATING"
+        else:
+            state = "IDLE"
 
+        logger.info(f"[MASTER] Workers connected: {num_workers}")
+        logger.info(f"[MASTER] State: {state}")
 
     # ---- CALLBACK: Receive updates ----
     async def on_result_received(client_id, data_bytes):
         # client_id is worker_id (string) from handshake
         # Reject if handshake not complete
-        if client_id not in orchestrator.workers or orchestrator.workers[client_id] != WorkerState.HANDSHAKE_DONE:
-            logger.error(f"Worker {client_id} sent result before handshake!")
+        if client_id not in orchestrator.workers or orchestrator.workers[client_id] not in (
+            WorkerState.HANDSHAKE_DONE,
+            WorkerState.TASK_SENT
+        ):
+            logger.error(f"Worker {client_id} sent result before handshake or task dispatch!")
             return
 
         # Decode JSON payload
@@ -79,7 +92,7 @@ async def main():
             for f in RECEIVED_DIR.glob(f"worker_*_update_round{round_no}.npz"):
                 arr = np.load(f, allow_pickle=True)
                 updates.append({k: arr[k] for k in arr.files})
-
+                logger.info(f"Loaded update from {f}")
             if updates:
                 keys = updates[0].keys()
                 avg_update = {k: sum(u[k] for u in updates) / len(updates) for k in keys}
@@ -93,10 +106,12 @@ async def main():
 
 
     # Hook callbacks
-    server.on_worker_connected = on_worker_connected
+    server.on_worker_connected = orchestrator.on_worker_connected
+    server.on_worker_ready = orchestrator.on_worker_ready
     server.on_result_received = on_result_received
 
-    logger.info("Master booting... waiting for workers")
+    logger.info("Master booting... ")
+    print_status()
     await orchestrator.run(port=DEFAULT_PORT)
 
 if __name__ == "__main__":
