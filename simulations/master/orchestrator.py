@@ -14,12 +14,11 @@ Crypto, handshake, transport are handled by SecureServer.
 import asyncio
 import json
 import logging
-from enum import Enum
 from pathlib import Path
 from typing import Dict, Any
 from shared.state import MasterState, WorkerState
 logger = logging.getLogger("orchestrator")
-
+from simulations.master.aggregator import aggregate
 # ============================================================
 # ORCHESTRATOR CORE
 # ============================================================
@@ -39,7 +38,6 @@ class Orchestrator:
         self.training_active = False
         self.enable_resume = False 
         self.master_state = MasterState.IDLE
-        self.initial_model_sent: set[str] = set()
 
         self.state_path = state_path
         if self.state_path:
@@ -173,22 +171,26 @@ class Orchestrator:
             st == WorkerState.WAITING_FOR_AGGREGATE
             for st in active_workers.values()
         )
+    
 
+    
     # ========================================================
     # EXPLICIT TRAINING CONTROL (CORE FIX)
     # ========================================================
     async def start_training(self, rounds: int, min_workers: int) -> None:
-        ready_workers = [
-            wid for wid, st in self.workers.items()
-            if st == WorkerState.READY
-        ]
-
-        if len(ready_workers) < min_workers:
-            raise RuntimeError("Not enough READY workers")
+        # --- wait for READY workers ---
+        while True:
+            ready_workers = [
+                wid for wid, st in self.workers.items()
+                if st == WorkerState.READY
+            ]
+            if len(ready_workers) >= min_workers:
+                break
+            logger.info(f"Waiting for READY workers... {len(ready_workers)}/{min_workers}")
+            await asyncio.sleep(0.5)
 
         self.training_active = True
         self.master_state = MasterState.ROUND_ACTIVE
-
         logger.info(f"Training started with {len(ready_workers)} workers")
 
         for r in range(rounds):
@@ -197,78 +199,96 @@ class Orchestrator:
 
             await self.start_round(r)
 
-            # 🔒 BLOCK until all workers respond
+            # BLOCK until all workers respond
             while not self.all_results_received():
                 await asyncio.sleep(0.2)
 
             self.master_state = MasterState.AGGREGATING
             final_output = self.aggregate_results()
-
+            if final_output is None:
+                logger.warning(f"[ROUND {r}] No results to aggregate, skipping broadcast")
+                continue  # skip broadcasting this round
             self.master_state = MasterState.BROADCASTING
             await self.broadcast_aggregated_model(final_output)
-
-            # Workers go back to WAITING_NEXT_ROUND
-            #for wid in self.workers:
-            #    if self.workers[wid] != WorkerState.FAILED:
-            #        self.workers[wid] = WorkerState.WAITING_NEXT_ROUND
 
         self.training_active = False
         self.master_state = MasterState.IDLE
         logger.info("Training complete")
 
     async def start_round(self, round_no: int) -> None:
-        logger.info(f"Starting round {round_no}")
+        logger.info(f"[MASTER] Starting round {round_no}")
         self.master_state = MasterState.ROUND_ACTIVE
+        self.round = round_no
         self.results.clear()
 
+        logger.info(f"[MASTER] Current workers: {list(self.workers.items())}")
+        
         for worker_id, state in self.workers.items():
+            logger.info(f"[MASTER] Worker {worker_id}: state={state}")
             if state == WorkerState.READY:
-                payload = self.prepare_task_for(worker_id, round_no)
+                logger.info(f"[MASTER] Worker {worker_id} is READY, sending model...")
+                # Read model bytes
+                with open(self.model_path, "rb") as f:
+                    model_bytes = f.read()
 
-                await self.server.send_to_worker(
-                    worker_id,
-                    payload,
-                    msg_type="START_ROUND"
-                )
+                # Wrap in JSON
+                payload = {
+                    "type": "MODEL_FILE",
+                    "payload_hex": model_bytes.hex()
+                }
+                await self.server.send_to_worker(worker_id, json.dumps(payload).encode())
+                logger.info(f"Model sent to {worker_id} for round {round_no}")
 
+                # Mark worker as TRAINING
                 self.workers[worker_id] = WorkerState.TRAINING
+            else:
+                logger.info(f"[MASTER] Worker {worker_id} NOT READY (state={state}), skipping")
 
         self._save_state()
 
-
     def prepare_task_for(self, worker_id: str, round_no: int) -> bytes:
         """
-        Prepare task payload for a specific worker.
-        This is a placeholder and should be customized.
+        Send the current global model to the worker for training.
         """
-        task = {
-            "round": round_no,
-            "task_data": f"Task for worker {worker_id} in round {round_no}"
-        }
-        return json.dumps(task).encode('utf-8')
+
+        if not self.model_path or not self.model_path.exists():
+            raise FileNotFoundError("Global model file not found")
+
+        # Send raw npz bytes
+        with open(self.model_path, "rb") as f:
+            model_bytes = f.read()
+
+        logger.info(f"Prepared model for worker {worker_id} (round {round_no})")
+        return model_bytes
     
     # ========================================================
     # AGGREGATION
     # ========================================================
-    def aggregate_results(self) -> Any:
-        """
-        Aggregate worker outputs using aggregator module.
-        """
-        logger.info("Aggregating worker results")
-
-        from simulations.master.aggregator import aggregate
+    def aggregate_results(self):
+        if not self.results:
+            logger.warning("No results yet, waiting for workers...")
+            return None  # don’t crash
 
         final_output = aggregate(self.results)
         return final_output
-
-
+    
     # ========================================================
     # ROUND FINALIZATION
     # ========================================================
-    def finalize_round(self, final_output: Any) -> None:
-        self.server.write_output(final_output)
+    def finalize_round(self, final_output: bytes) -> None:
+        if not self.state_path:
+            logger.warning("No state_path set; skipping output write")
+            return
+
+        out_dir = self.state_path.parent
+        out_path = out_dir / f"aggregated_round_{self.round}.npz"
+
+        with open(out_path, "wb") as f:
+            f.write(final_output)
+
+        logger.info(f"Aggregated model written to {out_path}")
+
         self.results.clear()
-        logger.info(f"Round {self.round} finalized")
         self._save_state()
 
     async def on_worker_ready(self, worker_id: str, msg: bytes) -> None:
@@ -279,74 +299,50 @@ class Orchestrator:
             return
 
         # Ignore READY if already training
-        if self.workers.get(worker_id) == WorkerState.TRAINING:
-            logger.info(f"Ignoring READY from worker {worker_id}, already TRAINING")
+        if self.workers[worker_id] == WorkerState.TRAINING:
+            logger.info(f"Ignoring READY from {worker_id}, already TRAINING")
             return
 
+        # Valid READY transitions
         if self.workers[worker_id] not in (
             WorkerState.CONNECTED,
             WorkerState.WAITING_FOR_AGGREGATE,
-            WorkerState.WAITING_FOR_ROUND
+            WorkerState.WAITING_FOR_ROUND,
         ):
             logger.warning(
-                f"READY from worker {worker_id} in state {self.workers[worker_id]}"
+                f"READY from worker {worker_id} in invalid state {self.workers[worker_id]}"
             )
             return
 
-        # Send initial model ONLY once
-        if worker_id not in self.initial_model_sent:
-            self.initial_model_sent.add(worker_id)  # mark first!
-            try:
-                if not self.model_path or not self.model_path.exists():
-                    raise FileNotFoundError(self.model_path)
-
-                await self.server.send_file(worker_id, self.model_path)
-                logger.info(f"Initial model sent to {worker_id}")
-
-                # Set worker to TRAINING after sending
-                self.workers[worker_id] = WorkerState.TRAINING
-                self._save_state()
-
-            except Exception as e:
-                logger.error(f"Failed to send model to {worker_id}: {e}")
-                self.workers[worker_id] = WorkerState.FAILED
-                self._save_state()
-                return
-        else:
-            # No need to send model again → safe to mark READY
-            self.workers[worker_id] = WorkerState.READY
-
-        # Update master state
-        if all(
-            st == WorkerState.READY
-            for st in self.workers.values()
-            if st != WorkerState.FAILED
-        ):
-            self.master_state = MasterState.IDLE
-
+        # JUST mark READY — nothing else
+        self.workers[worker_id] = WorkerState.READY
         self._save_state()
-    async def broadcast_aggregated_model(self, final_output: Any) -> None:
-        """ Broadcast aggregated model to all READY workers.
-        """
+
+        ready = sum(
+            1 for st in self.workers.values()
+            if st == WorkerState.READY
+        )
+        logger.info(f"[MASTER] READY workers = {ready}")
+
+    async def broadcast_aggregated_model(self, final_output: bytes) -> None:
         logger.info("Broadcasting aggregated model to workers")
 
-        # Serialize final output (customize as needed)
-        payload = json.dumps({
-            "round": self.round,
-            "model": final_output  # adjust serialization as needed
-        }).encode('utf-8')
-
         for worker_id, state in self.workers.items():
-            if state == WorkerState.READY:
-                await self.server.send_to_worker(
-                    worker_id,
-                    payload,
-                )
+            logger.info(f"[MASTER] Broadcasting to {worker_id}, current state: {state}")
+            # Workers should be in WAITING_FOR_AGGREGATE state after sending results
+            if state == WorkerState.WAITING_FOR_AGGREGATE:
+                logger.info(f"[MASTER] Sending aggregated model ({len(final_output)} bytes) to {worker_id}")
+                # Send aggregated model as protected message
+                await self.server.send_to_worker(worker_id, final_output, msg_type="AGGREGATED_MODEL")
                 logger.info(f"Aggregated model sent to {worker_id}")
-
-        # Finalize round
+                # Mark worker as ready for next round
+                self.workers[worker_id] = WorkerState.READY
+            else:
+                logger.warning(f"[MASTER] Cannot broadcast to {worker_id}: not in WAITING_FOR_AGGREGATE state (state={state})")
+        
         self.finalize_round(final_output)
 
+        self.finalize_round(final_output)
 
     # ========================================================
     # MAIN EVENT LOOP
