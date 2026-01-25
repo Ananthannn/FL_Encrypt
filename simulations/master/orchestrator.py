@@ -11,12 +11,13 @@ Responsibilities:
 
 Crypto, handshake, transport are handled by SecureServer.
 """
+import asyncio
 import json
 import logging
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any
-from shared.state import WorkerState
+from shared.state import MasterState, WorkerState
 logger = logging.getLogger("orchestrator")
 
 # ============================================================
@@ -35,6 +36,10 @@ class Orchestrator:
         self.results: Dict[str, bytes] = {}
         self.round: int = 0
         self.model_path = model_path
+        self.training_active = False
+        self.enable_resume = False 
+        self.master_state = MasterState.IDLE
+        self.initial_model_sent: set[str] = set()
 
         self.state_path = state_path
         if self.state_path:
@@ -47,6 +52,11 @@ class Orchestrator:
     # STATE MANAGEMENT
     # ========================================================
     def _load_state(self) -> None:
+        if not self.enable_resume:
+            logger.info("Checkpoint resume disabled — starting from round 0")
+            self.round = 0
+            return
+
         if not self.state_path.exists():
             return
 
@@ -56,6 +66,7 @@ class Orchestrator:
             logger.info(f"Resumed orchestrator from round {self.round}")
         except Exception as e:
             logger.warning(f"Failed to load state.json: {e}")
+
 
     def _save_state(self) -> None:
         if not self.state_path:
@@ -75,46 +86,12 @@ class Orchestrator:
     async def on_worker_connected(self, worker_id: str) -> None:
         """
         Called immediately after a worker completes handshake.
-        Marks the worker as connected and handshake done.
-        Do NOT send the initial model/task here — wait for READY signal.
         """
-        if worker_id not in self.workers:
-            self.workers[worker_id] = WorkerState.CONNECTED
-            self._save_state()
-
-        self.workers[worker_id] = WorkerState.HANDSHAKE_DONE
+        self.workers[worker_id] = WorkerState.CONNECTED
+        self.master_state = MasterState.WAITING_FOR_WORKERS
         self._save_state()
-        logger.info(f"Worker {worker_id} connected and handshake complete")
 
-
-
-    # ========================================================
-    # TASK ORCHESTRATION
-    # ========================================================
-    async def dispatch_task(self, worker_id: str, payload: bytes) -> None:
-        """
-        Securely send task to worker.
-        """
-        try:
-            await self.server.send_to_worker(worker_id, payload)
-            self.workers[worker_id] = WorkerState.TASK_SENT
-            self._save_state()
-
-            logger.info(f"Task dispatched to worker {worker_id}")
-        except Exception as e:
-            self.workers[worker_id] = WorkerState.FAILED
-            self._save_state()
-
-            logger.error(f"Task dispatch failed for {worker_id}: {e}")
-
-
-    async def dispatch_to_all(self, payload: bytes) -> None:
-        """
-        Send same task to all ready workers.
-        """
-        for worker_id, state in self.workers.items():
-            if state == WorkerState.HANDSHAKE_DONE:
-                await self.dispatch_task(worker_id, payload)
+        logger.info(f"Worker {worker_id} connected")
 
 
     # ========================================================
@@ -166,7 +143,7 @@ class Orchestrator:
         # ACCEPT RESULT
         # ------------------------------
         self.results[worker_id] = data
-        self.workers[worker_id] = WorkerState.RESULT_RECEIVED
+        self.workers[worker_id] = WorkerState.WAITING_FOR_AGGREGATE
         self._save_state()
 
         logger.info(f"Result accepted from worker {worker_id}")
@@ -193,7 +170,7 @@ class Orchestrator:
 
         # All active workers must have sent results
         return all(
-            st == WorkerState.RESULT_RECEIVED
+            st == WorkerState.WAITING_FOR_AGGREGATE
             for st in active_workers.values()
         )
 
@@ -203,31 +180,61 @@ class Orchestrator:
     async def start_training(self, rounds: int, min_workers: int) -> None:
         ready_workers = [
             wid for wid, st in self.workers.items()
-            if st == WorkerState.HANDSHAKE_DONE
+            if st == WorkerState.READY
         ]
 
         if len(ready_workers) < min_workers:
-            raise RuntimeError(
-                f"Not enough workers ({len(ready_workers)}/{min_workers})"
-            )
+            raise RuntimeError("Not enough READY workers")
 
-        logger.info(
-            f"Starting training: rounds={rounds}, workers={len(ready_workers)}"
-        )
+        self.training_active = True
+        self.master_state = MasterState.ROUND_ACTIVE
+
+        logger.info(f"Training started with {len(ready_workers)} workers")
 
         for r in range(rounds):
             self.round = r
             self.results.clear()
+
             await self.start_round(r)
 
+            # 🔒 BLOCK until all workers respond
+            while not self.all_results_received():
+                await asyncio.sleep(0.2)
+
+            self.master_state = MasterState.AGGREGATING
+            final_output = self.aggregate_results()
+
+            self.master_state = MasterState.BROADCASTING
+            await self.broadcast_aggregated_model(final_output)
+
+            # Workers go back to WAITING_NEXT_ROUND
+            #for wid in self.workers:
+            #    if self.workers[wid] != WorkerState.FAILED:
+            #        self.workers[wid] = WorkerState.WAITING_NEXT_ROUND
+
+        self.training_active = False
+        self.master_state = MasterState.IDLE
+        logger.info("Training complete")
+
     async def start_round(self, round_no: int) -> None:
-        logger.info(f"Round {round_no} starting")
-        for worker_id in self.workers:
-            if self.workers[worker_id] == WorkerState.HANDSHAKE_DONE:
+        logger.info(f"Starting round {round_no}")
+        self.master_state = MasterState.ROUND_ACTIVE
+        self.results.clear()
+
+        for worker_id, state in self.workers.items():
+            if state == WorkerState.READY:
                 payload = self.prepare_task_for(worker_id, round_no)
-                await self.server.send_to_worker(worker_id, payload)
-                self.workers[worker_id] = WorkerState.TASK_SENT
+
+                await self.server.send_to_worker(
+                    worker_id,
+                    payload,
+                    msg_type="START_ROUND"
+                )
+
+                self.workers[worker_id] = WorkerState.TRAINING
+
         self._save_state()
+
 
     def prepare_task_for(self, worker_id: str, round_no: int) -> bytes:
         """
@@ -259,36 +266,87 @@ class Orchestrator:
     # ROUND FINALIZATION
     # ========================================================
     def finalize_round(self, final_output: Any) -> None:
-        """
-        Persist final output and advance round.
-        """
         self.server.write_output(final_output)
-
-        self.round += 1
         self.results.clear()
-
         logger.info(f"Round {self.round} finalized")
         self._save_state()
 
     async def on_worker_ready(self, worker_id: str, msg: bytes) -> None:
-        logger.info(f"Worker {worker_id} ready with message: {msg}")
-        try:
-            if not self.model_path or not self.model_path.exists():
-                raise FileNotFoundError(f"Initial model not found: {self.model_path}")
+        logger.info(f"Worker {worker_id} sent READY")
 
-            # Keep worker in HANDSHAKE_DONE while sending initial model
-            await self.server.send_file(worker_id, self.model_path)
-            logger.info(f"Initial model sent to worker {worker_id} via send_file()")
+        if worker_id not in self.workers:
+            logger.warning(f"READY from unknown worker {worker_id}")
+            return
 
-            # Do NOT mark TASK_SENT here; only mark TASK_SENT when you actually send a training payload in start_round
-            # self.workers[worker_id] = WorkerState.TASK_SENT  <-- remove this line
+        # Ignore READY if already training
+        if self.workers.get(worker_id) == WorkerState.TRAINING:
+            logger.info(f"Ignoring READY from worker {worker_id}, already TRAINING")
+            return
 
-            self._save_state()  # Still save state if needed
+        if self.workers[worker_id] not in (
+            WorkerState.CONNECTED,
+            WorkerState.WAITING_FOR_AGGREGATE,
+            WorkerState.WAITING_FOR_ROUND
+        ):
+            logger.warning(
+                f"READY from worker {worker_id} in state {self.workers[worker_id]}"
+            )
+            return
 
-        except Exception as e:
-            logger.error(f"Failed to send initial model to {worker_id}: {e}")
-            self.workers[worker_id] = WorkerState.FAILED
-            self._save_state()
+        # Send initial model ONLY once
+        if worker_id not in self.initial_model_sent:
+            self.initial_model_sent.add(worker_id)  # mark first!
+            try:
+                if not self.model_path or not self.model_path.exists():
+                    raise FileNotFoundError(self.model_path)
+
+                await self.server.send_file(worker_id, self.model_path)
+                logger.info(f"Initial model sent to {worker_id}")
+
+                # Set worker to TRAINING after sending
+                self.workers[worker_id] = WorkerState.TRAINING
+                self._save_state()
+
+            except Exception as e:
+                logger.error(f"Failed to send model to {worker_id}: {e}")
+                self.workers[worker_id] = WorkerState.FAILED
+                self._save_state()
+                return
+        else:
+            # No need to send model again → safe to mark READY
+            self.workers[worker_id] = WorkerState.READY
+
+        # Update master state
+        if all(
+            st == WorkerState.READY
+            for st in self.workers.values()
+            if st != WorkerState.FAILED
+        ):
+            self.master_state = MasterState.IDLE
+
+        self._save_state()
+    async def broadcast_aggregated_model(self, final_output: Any) -> None:
+        """ Broadcast aggregated model to all READY workers.
+        """
+        logger.info("Broadcasting aggregated model to workers")
+
+        # Serialize final output (customize as needed)
+        payload = json.dumps({
+            "round": self.round,
+            "model": final_output  # adjust serialization as needed
+        }).encode('utf-8')
+
+        for worker_id, state in self.workers.items():
+            if state == WorkerState.READY:
+                await self.server.send_to_worker(
+                    worker_id,
+                    payload,
+                )
+                logger.info(f"Aggregated model sent to {worker_id}")
+
+        # Finalize round
+        self.finalize_round(final_output)
+
 
     # ========================================================
     # MAIN EVENT LOOP
