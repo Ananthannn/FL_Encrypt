@@ -8,12 +8,14 @@ import numpy as np
 import io
 import warnings
 
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from kimura.session.master import SecureServer
 from kimura.protocol.constants import DEFAULT_PORT
 from orchestrator import Orchestrator
 from shared.state import WorkerState
+
 
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 logging.basicConfig(
@@ -23,6 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # Paths
 KEY_PATH = ROOT / "simulations" / "keys"
 MODEL_PATH = ROOT / "simulations" / "shared" / "model.npz"
@@ -30,14 +33,21 @@ RECEIVED_DIR = ROOT / "simulations" / "shared"
 RECEIVED_DIR.mkdir(parents=True, exist_ok=True)
 STATE_PATH = RECEIVED_DIR / "master_state.json"
 
+
 # 🆕 GLOBAL ORCHESTRATOR (shared across tasks)
 orchestrator = None
+
 
 async def main():
     global orchestrator
     
     # ---- CREATE SERVER + ORCHESTRATOR ----
     server = SecureServer(str(KEY_PATH), base_output=str(RECEIVED_DIR))
+    
+    # 🔥 CRITICAL: DISABLE KIMURA AUTO-BEHAVIOR
+    server.auto_broadcast_on_ready = False  # No auto-model send
+    server.auto_training_loop = False       # No auto-FL cycle
+    
     orchestrator = Orchestrator(server=server, state_path=STATE_PATH, model_path=MODEL_PATH)
     
     # ---- STATUS MONITOR (every 5s) ----
@@ -69,76 +79,78 @@ async def main():
             logger.error(f"❌ Training failed: {e}")
         finally:
             writer.close()
+            await writer.wait_closed()
     
-    # ---- ORIGINAL CALLBACKS ----
+    # ---- FIXED CALLBACKS - Handle RAW NPZ bytes ----
     async def on_result_received(client_id, data_bytes):
+        """Handle RAW .npz bytes from workers (not JSON)"""
+        global orchestrator
+        
         if not data_bytes:
             logger.warning(f"Worker {client_id} sent empty data")
             return
         
         try:
-            payload = json.loads(data_bytes)
-        except (json.JSONDecodeError, TypeError):
-            logger.error(f"Worker {client_id} sent invalid JSON")
-            return
-        
-        if orchestrator.workers.get(client_id) != WorkerState.TRAINING:
-            logger.warning(f"Worker {client_id} sent update in wrong state")
-            return
-        
-        round_no = payload.get("round_no")
-        if round_no != orchestrator.round:
-            logger.warning(f"Worker {client_id} wrong round: {round_no}")
-            return
-        
-        try:
-            weights = bytes.fromhex(payload["weights"])
-        except (KeyError, ValueError):
-            logger.error(f"Worker {client_id} invalid weights")
-            return
-        
-        # Save + notify orchestrator
-        out_path = RECEIVED_DIR / f"worker_{client_id}_update_round{round_no}.npz"
-        with open(out_path, "wb") as f:
-            f.write(weights)
-        logger.info(f"Saved update from Worker {client_id} for round {round_no}")
-        
-        await orchestrator.receive_result(client_id, weights, round_no)
-        
-        # Auto-aggregate if all ready
-        if orchestrator.all_results_received():
-            updates = []
-            for f in RECEIVED_DIR.glob(f"worker_*_update_round{round_no}.npz"):
-                arr = np.load(f, allow_pickle=True)
-                updates.append({k: arr[k] for k in arr.files})
-                logger.info(f"Loaded update from {f}")
+            # 🆕 Save RAW NPZ directly
+            out_path = RECEIVED_DIR / f"worker_{client_id}_update_round{orchestrator.round}.npz"
+            with open(out_path, "wb") as f:
+                f.write(data_bytes)
+            logger.info(f"💾 Saved RAW update from Worker {client_id} | Size: {len(data_bytes)/1024:.1f}KB")
             
-            if updates:
-                keys = updates[0].keys()
-                avg_update = {k: sum(u[k] for u in updates) / len(updates) for k in keys}
-                buf = io.BytesIO()
-                np.savez(buf, **avg_update)
-                buf.seek(0)
-                await server.broadcast_weights(buf.getvalue())
-                logger.info(f"📡 Broadcasted averaged weights for round {round_no}")
-
-    # Hook callbacks
+            # Notify orchestrator
+            await orchestrator.receive_result(client_id, data_bytes, orchestrator.round)
+            
+            # Auto-aggregate when all workers done
+            if orchestrator.all_results_received():
+                await aggregate_and_broadcast(orchestrator.round)
+                
+        except Exception as e:
+            logger.error(f"❌ Error processing {client_id}: {e}")
+    
+    async def aggregate_and_broadcast(round_no):
+        """Aggregate all worker updates and broadcast average"""
+        updates = []
+        
+        # Load all updates for this round
+        for f in RECEIVED_DIR.glob(f"worker_*_update_round{round_no}.npz"):
+            arr = np.load(f, allow_pickle=True)
+            updates.append({k: arr[k] for k in arr.files})
+            logger.info(f"📊 Loaded update from {f.name}")
+        
+        if not updates:
+            logger.warning(f"No updates found for round {round_no}")
+            return
+        
+        # Average weights across workers
+        keys = updates[0].keys()
+        avg_weights = {k: np.mean([u[k] for u in updates], axis=0) for k in keys}
+        
+        # Serialize averaged model
+        buf = io.BytesIO()
+        np.savez(buf, **avg_weights)
+        buf.seek(0)
+        
+        # Broadcast to all workers
+        await server.broadcast_weights(buf.getvalue())
+        logger.info(f"📡 Round {round_no} → Broadcasted avg weights to {len(orchestrator.workers)} workers")
+    
+    # Hook FIXED callbacks
     server.on_worker_connected = orchestrator.on_worker_connected
     server.on_worker_ready = orchestrator.on_worker_ready
     server.on_result_received = on_result_received
     
-    logger.info("🎬 Master booting...")
+    logger.info("🎬 Master booting - Workers will STAY IDLE until trigger...")
     
     # 🔥 START ALL SERVICES TOGETHER
     await asyncio.gather(
-        orchestrator.server.serve_forever(DEFAULT_PORT),  # Workers on 8443
-        status_monitor(),                                  # Status every 5s
-        training_trigger_server()                          # Trigger on 8444
+        server.serve_forever(DEFAULT_PORT),     # Workers connect on 8443
+        status_monitor(),                       # Status every 5s
+        training_trigger_server()               # Trigger on 8444
     )
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Master shutdown")
-#!/usr/bin/env python3
