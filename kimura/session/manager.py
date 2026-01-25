@@ -26,6 +26,7 @@ class SessionManager:
         self.server_running = False
         self.active_clients = {}  # {client_id: (reader, writer, state_machine)}
         self.client_counter = 0
+        self.worker_id = None  # Will be set during handshake (derived from peer pubkey)
     
     async def establish_channel(self, reader=None, writer=None, host=None, port=DEFAULT_PORT):
         if self.role == "client":
@@ -48,6 +49,7 @@ class SessionManager:
             await self.state_machine.transition("send_response", reader=self.reader, writer=self.writer)
             peer_pubkey = self.state_machine.get_peer_identity_key()
             worker_id = hashlib.sha256(peer_pubkey).hexdigest()[:16]
+            self.worker_id = worker_id  # Store worker_id in SessionManager
             self.active_clients[worker_id] = (reader, writer, self.state_machine)
             logger.info(f"{self.role.upper()}: Handshake completed")
         self.ready.set()
