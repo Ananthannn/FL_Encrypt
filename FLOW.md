@@ -137,3 +137,20 @@ Here’s what you’d usually see in `orchestrator.py`:
 If you want, I can **draw a full visual pipeline diagram** of `orchestrator.py` + master + worker + crypto + ML so you can see **exactly how data and state flow**.
 
 Do you want me to make that diagram?
+
+
+simulations/
+├── master/
+│   ├── run_master.py        ← starts networking + waits
+│   ├── orchestrator.py     ← FL brain (rounds, quorum, state)
+│   ├── trainer.py          ← loads model, aggregation logic
+│   └── start_training.py   ← HUMAN TRIGGER (IMPORTANT)
+│
+├── workers/
+│   ├── run_worker.py       ← worker process
+│   └── train.py            ← AI guy code (GPU)
+│
+└── shared/
+    ├── model.npz
+    ├── round_*.npz
+    └── master_state.json

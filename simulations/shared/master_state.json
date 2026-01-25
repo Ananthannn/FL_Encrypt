@@ -1,0 +1,13 @@
+{
+  "round": 0,
+  "workers": {
+    "ba795fd8a00ceb6b": "RESULT_RECEIVED",
+    "806c457d16e5e3a8": "RESULT_RECEIVED",
+    "43448262bf24a767": "RESULT_RECEIVED"
+  },
+  "results_received": [
+    "ba795fd8a00ceb6b",
+    "806c457d16e5e3a8",
+    "43448262bf24a767"
+  ]
+}

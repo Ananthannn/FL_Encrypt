@@ -25,33 +25,30 @@ class SecureClient:
     # Persistent FL Connection
     # -----------------------------
     async def connect_fl(self, host: str, port: int = DEFAULT_PORT, initial_model_path: str = "model.npz"):
-        """
-        Connect to master, receive initial model, send first update, then start FL loop.
-        """
         self.mgr = SessionManager("client", self.key_path)
 
         # 1️⃣ Secure handshake
         await self.mgr.establish_channel(host=host, port=port)
         logger.info("Handshake complete with server")
+        await self.mgr.send_data(b'READY')  # Notify server we're ready
 
         # 2️⃣ Receive initial model (FILE)
-        logger.info("WORKER: waiting for initial model")
-        await self.mgr.recv_file(initial_model_path)
-        logger.info(f"WORKER: initial model received: {initial_model_path}")
+        logger.info("WORKER: waiting for initial task model")
+        await self.mgr.recv_file(Path(initial_model_path))
 
         # 3️⃣ Train ONCE immediately
         if not self.weights_callback:
             raise RuntimeError("Weights callback not set!")
         logger.info("WORKER: training initial model")
-        updated_bytes = await self.weights_callback(
-            Path(initial_model_path).read_bytes()
-        )
+        updated_bytes = await self.weights_callback(Path(initial_model_path).read_bytes())
 
-        # 4️⃣ SEND FIRST UPDATE (THIS WAS MISSING)
+        # 4️⃣ SEND FIRST UPDATE
         logger.info("WORKER: sending initial update to master")
         await self._send_update_json(updated_bytes, round_no=0)
-        # 5️⃣ NOW enter persistent loop
+
+        # 5️⃣ Now enter persistent loop
         await self._fl_loop()
+
 
     async def _send_update_json(self, weights: bytes, round_no: int):
         """

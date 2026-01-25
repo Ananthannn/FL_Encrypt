@@ -30,9 +30,8 @@ class SecureServer:
         self.key_path = Path(key_path)
         self.base_output = Path(base_output) if base_output else None
 
-        self.clients_processed = 0
-        self.active_clients = {}  # client_id -> (reader, writer, SessionManager)
-        self.client_states = {}   # client_id -> WorkerState
+        self.active_clients = {}  # worker_id -> (reader, writer, SessionManager)
+        self.client_states = {}   # worker_id -> WorkerState
 
         # Callbacks
         self.on_worker_connected = None
@@ -44,42 +43,52 @@ class SecureServer:
     # CLIENT CONNECTION HANDLING
     # ===============================
     async def handle_client(self, reader, writer):
-        client_id = self.clients_processed
-        self.clients_processed += 1
-        
         mgr = SessionManager("server", str(self.key_path), self.base_output)
-        self.active_clients[client_id] = (reader, writer, mgr)
         
         try:
             await mgr.establish_channel(reader=reader, writer=writer)
-            logger.info(f"Client #{client_id} handshake complete")
-            if self.on_worker_connected:
-                await self.on_worker_connected(str(client_id))
-            # Send model
-            model_path = self.base_output / "model.npz"
-            await mgr.send_file(str(model_path))
+            # Extract worker_id from SessionManager (derived from peer pubkey during handshake)
+            worker_id = mgr.worker_id
+            self.active_clients[worker_id] = (reader, writer, mgr)
             
+            logger.info(f"Worker {worker_id} handshake complete")
+            if self.on_worker_connected:
+                await self.on_worker_connected(worker_id)
+                  
             # LOOP for multiple rounds - DON'T EXIT HERE
-            while client_id in self.active_clients:  # Keep alive
+            while worker_id in self.active_clients:  # Keep alive
                 try:
                     data = await mgr.recv_data()
-                    if self.on_result_received:
-                        await self.on_result_received(client_id, data)
+                    # Check if worker is signaling READY for initial task
+                    if data == b'READY':
+                        if self.on_worker_ready:
+                            await self.on_worker_ready(worker_id, data)
+                    else:
+                        # Regular result/update from worker
+                        if self.on_result_received:
+                            await self.on_result_received(worker_id, data)
                 except asyncio.IncompleteReadError:
-                    logger.info(f"Client #{client_id} completed rounds normally (EOF received)")
+                    logger.info(f"Worker {worker_id} completed rounds normally (EOF received)")
                     break  # Worker finished cleanly - exit loop
                 except Exception as e:
-                    logger.error(f"Client #{client_id} recv error: {e}")
+                    logger.error(f"Worker {worker_id} recv error: {e}")
                     break  # Other network/protocol error
         
         except Exception as e:
-            logger.error(f"Client #{client_id} error: {e}")
+            logger.error(f"Worker handshake/connection error: {e}")
         finally:
-            # Only close if client was removed
-            if client_id in self.active_clients:
-                del self.active_clients[client_id]
+            # Only close if worker was in active list
+            for wid in list(self.active_clients.keys()):
+                r, w, m = self.active_clients[wid]
+                if w is writer:  # Find and remove by writer
+                    del self.active_clients[wid]
+                    logger.info(f"Worker {wid} disconnected")
+                    break
+            try:
                 writer.close()
                 await writer.wait_closed()
+            except:
+                pass
 
     # ===============================
     # SERVER LOOP
@@ -93,42 +102,42 @@ class SecureServer:
     # ===============================
     # SEND / RECEIVE UTILITIES
     # ===============================
-    async def send_file(self, client_id: int, file_path: str):
-        """Send large model (initial round) to a specific client"""
-        if client_id not in self.active_clients:
-            logger.warning(f"Client #{client_id} not active")
+    async def send_file(self, worker_id: str, file_path: str):
+        """Send large model (initial round) to a specific worker"""
+        if worker_id not in self.active_clients:
+            logger.warning(f"Worker {worker_id} not active")
             return
-        _, writer, mgr = self.active_clients[client_id]
+        _, writer, mgr = self.active_clients[worker_id]
         await mgr.send_file(file_path)
-        logger.info(f"Sent full model ({Path(file_path).name}) to Client #{client_id}")
+        logger.info(f"Sent full model ({Path(file_path).name}) to Worker {worker_id}")
     
     async def broadcast_weights(self, weights: bytes):
         sent_count = 0
         dead_clients = []
         
-        for client_id in list(self.active_clients.keys()):
-            if client_id not in self.active_clients:
+        for worker_id in list(self.active_clients.keys()):
+            if worker_id not in self.active_clients:
                 continue
                 
-            _, writer, mgr = self.active_clients[client_id]
+            _, writer, mgr = self.active_clients[worker_id]
             try:
                 # Check if connection alive + handshake complete
                 if mgr.state_machine.is_ready_for_protected():
                     await mgr.send_data(weights)
                     sent_count += 1
                 else:
-                    logger.warning(f"Client #{client_id} not ready")
-                    dead_clients.append(client_id)
+                    logger.warning(f"Worker {worker_id} not ready")
+                    dead_clients.append(worker_id)
             except Exception as e:
-                logger.error(f"Client #{client_id} broadcast failed: {e}")
-                dead_clients.append(client_id)
+                logger.error(f"Worker {worker_id} broadcast failed: {e}")
+                dead_clients.append(worker_id)
         
         # Clean dead clients
-        for cid in dead_clients:
-            if cid in self.active_clients:
-                _, writer, _ = self.active_clients[cid]
-                del self.active_clients[cid]
+        for wid in dead_clients:
+            if wid in self.active_clients:
+                _, writer, _ = self.active_clients[wid]
+                del self.active_clients[wid]
                 writer.close()
         
-        logger.info(f"Sent {len(weights)/1024:.1f}KB to {sent_count} clients")
+        logger.info(f"Sent {len(weights)/1024:.1f}KB to {sent_count} workers")
 
