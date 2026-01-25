@@ -20,34 +20,82 @@ class SecureClient:
         self.weights_callback: callable | None = None
         self.mgr: SessionManager | None = None
         self.on_weights_received = None  # callback for FL loop
+        self.current_round = 0  # Initialize round counter
 
     # -----------------------------
     # Persistent FL Connection
     # -----------------------------
     async def connect_fl(self, host: str, port: int = DEFAULT_PORT, initial_model_path: str = "model.npz"):
         self.mgr = SessionManager("client", self.key_path)
-
-        # 1️⃣ Secure handshake
+        
+        # 1. Handshake + READY
         await self.mgr.establish_channel(host=host, port=port)
         logger.info("Handshake complete with server")
-        await self.mgr.send_data(b'READY')  # Notify server we're ready
+        await self.mgr.send_data(b'READY')
+        logger.info("WORKER: Sent READY, waiting for master commands...")
+        
+        # 2. PERSISTENT event loop - NEVER exit
+        while True:
+            try:
+                logger.info("WORKER: Waiting for data from master...")
+                data = await self.mgr.recv_data()
+                logger.info(f"WORKER: Received {len(data)} bytes of data")
+                
+                # Try to parse as JSON for message type
+                try:
+                    msg_obj = json.loads(data.decode())
+                    msg_type = msg_obj.get("type")
+                    payload_hex = msg_obj.get("payload_hex")
+                    payload_text = msg_obj.get("payload", "")
+                    logger.info(f"WORKER: Parsed JSON message type='{msg_type}'")
+                    
+                    if msg_type == "MODEL_FILE":
+                        # Model file sent as hex in JSON
+                        if payload_hex:
+                            model_bytes = bytes.fromhex(payload_hex)
+                        elif payload_text:
+                            model_bytes = payload_text.encode()
+                        else:
+                            logger.error("WORKER: MODEL_FILE received but no payload found")
+                            continue
+                        
+                        logger.info(f"WORKER: Received MODEL_FILE ({len(model_bytes)} bytes)")
+                        model_path = Path(initial_model_path)
+                        with open(model_path, "wb") as f:
+                            f.write(model_bytes)
+                        logger.info(f"WORKER: Saved model {model_path}")
+                        
+                        # Train immediately when model received
+                        updated_bytes = await self.weights_callback(model_bytes, self.current_round)
+                        await self._send_update_json(updated_bytes, round_no=self.current_round)
+                        self.current_round += 1 
+                        
+                    elif msg_type == "AGGREGATED_MODEL":
+                        # Model file sent as hex in JSON
+                        if payload_hex:
+                            model_bytes = bytes.fromhex(payload_hex)
+                        elif payload_text:
+                            model_bytes = payload_text.encode()
+                        else:
+                            logger.error("WORKER: AGGREGATED_MODEL received but no payload found")
+                            continue
+                        
+                        logger.info(f"WORKER: Received AGGREGATED_MODEL ({len(model_bytes)} bytes)")
+                        model_path = Path(initial_model_path)
+                        with open(model_path, "wb") as f:
+                            f.write(model_bytes)
+                        logger.info("WORKER: New global model saved, ready for next round")
+                    else:
+                        logger.debug(f"WORKER: Ignoring unknown message type '{msg_type}'")
+                        
+                except (json.JSONDecodeError, ValueError) as e:
+                    # Not JSON - might be raw binary data (shouldn't happen with this protocol)
+                    logger.debug(f"WORKER: Received {len(data)} bytes of raw data (not JSON): {e}")
+                    
+            except Exception as e:
+                logger.error(f"WORKER loop error: {e}", exc_info=True)
+                await asyncio.sleep(1)  # Retry
 
-        # 2️⃣ Receive initial model (FILE)
-        logger.info("WORKER: waiting for initial task model")
-        await self.mgr.recv_file(Path(initial_model_path))
-
-        # 3️⃣ Train ONCE immediately
-        if not self.weights_callback:
-            raise RuntimeError("Weights callback not set!")
-        logger.info("WORKER: training initial model")
-        updated_bytes = await self.weights_callback(Path(initial_model_path).read_bytes())
-
-        # 4️⃣ SEND FIRST UPDATE
-        logger.info("WORKER: sending initial update to master")
-        await self._send_update_json(updated_bytes, round_no=0)
-
-        # 5️⃣ Now enter persistent loop
-        await self._fl_loop()
 
 
     async def _send_update_json(self, weights: bytes, round_no: int):
@@ -78,6 +126,10 @@ class SecureClient:
     # -----------------------------
     # Register callback for server updates
     # -----------------------------
+    # this is where the transferlearning model will be defined NOT TRAINED AND THEN ITS CALLED TO
+    # THE RUN_WORKER FUNCTION TO BE TRAINED NOW OK??? AND 
+    # THEN THE CALLBACK WILL BE CALLED WHEN WEIGHTS ARE RECEIVED
+    # THEN IN 
     def set_weights_callback(self, callback: callable):
         """
         Set callback for handling received server weights.

@@ -11,18 +11,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def trigger_training(rounds: int):
-    try:
-        reader, writer = await asyncio.open_connection('127.0.0.1', 8444)
-        cmd = f"START {rounds}\n".encode()
-        writer.write(cmd)
-        await writer.drain()
-        logger.info(f"Triggered {rounds} training rounds! ")
-    except Exception as e:
-        logger.error(f"❌ Failed to trigger: {e}")
-    finally:
-        if 'writer' in locals():
-            writer.close()
-            await writer.wait_closed()
+    for attempt in range(5):
+        try:
+            reader, writer = await asyncio.open_connection('127.0.0.1', 8444)
+            writer.write(f"START {rounds}\n".encode())
+            await writer.drain()
+            resp = await reader.readline()
+            resp = resp.decode().strip()
+            if resp == "OK":
+                print(f"✅ Training triggered for {rounds} rounds")
+                break
+            elif resp == "BUSY":
+                print("⚠ Master busy, retrying in 1s...")
+                await asyncio.sleep(1)
+            else:
+                print("❌ Unknown response:", resp)
+                break
+        except Exception as e:
+            print("❌ Failed to connect:", e)
+            await asyncio.sleep(1)
+        finally:
+            if 'writer' in locals():
+                writer.close()
+                await writer.wait_closed()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trigger FL Training")

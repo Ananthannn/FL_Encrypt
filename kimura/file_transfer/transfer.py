@@ -94,6 +94,9 @@ async def recv_file(
     """✅ FULL integrity verification with ChunkMetadata."""
     # 1. Read header
     header = await recv_length_prefixed(reader)
+    if header is None:
+        logger.info("recv_file: EOF - no more data expected")
+        return  # MASTER FINISHED SENDING
     total_chunks, expected_size = struct.unpack('>QQ', header)
     
     chunks = []

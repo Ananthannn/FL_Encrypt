@@ -1,13 +1,8 @@
 {
-  "round": 0,
+  "round": 9,
   "workers": {
-    "ba795fd8a00ceb6b": "RESULT_RECEIVED",
-    "806c457d16e5e3a8": "RESULT_RECEIVED",
-    "43448262bf24a767": "RESULT_RECEIVED"
+    "726a42014a0c6d90": "READY",
+    "02bce76d59e9bea8": "READY"
   },
-  "results_received": [
-    "ba795fd8a00ceb6b",
-    "806c457d16e5e3a8",
-    "43448262bf24a767"
-  ]
+  "results_received": []
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import json
 import logging
 from pathlib import Path
 from kimura.session.manager import SessionManager
@@ -58,7 +59,8 @@ class SecureServer:
             # LOOP for multiple rounds - DON'T EXIT HERE
             while worker_id in self.active_clients:  # Keep alive
                 try:
-                    data = await mgr.recv_data()
+                    # Use timeout to allow server to send files between receives
+                    data = await asyncio.wait_for(mgr.recv_data(), timeout=60.0)
                     # Check if worker is signaling READY for initial task
                     if data == b'READY':
                         if self.on_worker_ready:
@@ -67,6 +69,10 @@ class SecureServer:
                         # Regular result/update from worker
                         if self.on_result_received:
                             await self.on_result_received(worker_id, data)
+                except asyncio.TimeoutError:
+                    # Worker is idle, but connection is still alive - continue listening
+                    await asyncio.sleep(0.1)
+                    continue
                 except asyncio.IncompleteReadError:
                     logger.info(f"Worker {worker_id} completed rounds normally (EOF received)")
                     break  # Worker finished cleanly - exit loop
@@ -89,6 +95,28 @@ class SecureServer:
                 await writer.wait_closed()
             except:
                 pass
+
+    async def send_to_worker(self, worker_id: str, payload: bytes, msg_type: str = None):
+        if worker_id not in self.active_clients:
+            logger.warning(f"Worker {worker_id} not active")
+            return
+        _, writer, mgr = self.active_clients[worker_id]
+
+        if msg_type:
+            # Only include payload in JSON if it's not empty and can be decoded
+            msg_obj = {"type": msg_type}
+            if payload:
+                try:
+                    msg_obj["payload"] = payload.decode()
+                except (UnicodeDecodeError, AttributeError):
+                    # If binary data, send as hex
+                    msg_obj["payload_hex"] = payload.hex()
+            msg = json.dumps(msg_obj).encode()
+        else:
+            msg = payload
+
+        await mgr.send_data(msg)
+        logger.info(f"Sent {msg_type or 'payload'} to Worker {worker_id}")
 
     # ===============================
     # SERVER LOOP
