@@ -1,11 +1,4 @@
-Perfect, let’s carefully go through this. I’ll break it into **four main sections**:
 
-1. What `orchestrator.py` does line by line (conceptually)
-2. What modules/folders it depends on — both **crypto** and **ML**
-3. What happens to the `simulations/` folder after the run
-4. Core functions in `orchestrator.py`, including **state updates**
-
----
 
 ## 1️⃣ Conceptual walkthrough of `orchestrator.py`
 
