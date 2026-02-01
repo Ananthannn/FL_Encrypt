@@ -5,59 +5,31 @@ from tensorflow.keras.layers import (
     Dense, Dropout, GlobalAveragePooling2D
 )
 
-
 class ModelMaker:
-    def __init__(self, input_shape, num_classes):
+    def __init__(self, input_shape=(224,224,3), num_classes=10):
         self.input_shape = input_shape
         self.num_classes = num_classes
 
-    # -------------------------------------------------
-    # Vanilla CNN (from scratch)
-    # -------------------------------------------------
-    def vanilla_cnn(self, conv_config):
-        model = Sequential()
-
-        for i, cfg in enumerate(conv_config):
-            model.add(
-                Conv2D(
-                    filters=cfg["filters"],
-                    kernel_size=cfg.get("kernel", 3),
-                    activation="relu",
-                    padding="same",
-                    input_shape=self.input_shape if i == 0 else None
-                )
-            )
-
-            if cfg.get("pool", False):
-                model.add(MaxPooling2D())
-
-            if "dropout" in cfg:
-                model.add(Dropout(cfg["dropout"]))
-
-        model.add(Flatten())
-        model.add(Dense(128, activation="relu"))
-        model.add(Dense(self.num_classes, activation="softmax"))
-
+    # ---------------------------
+    # Vanilla CNN (NEW)
+    # ---------------------------
+    def vanilla_cnn(self):
+        model = Sequential([
+            Conv2D(32, 3, activation="relu", input_shape=self.input_shape),
+            MaxPooling2D(),
+            Conv2D(64, 3, activation="relu"),
+            MaxPooling2D(),
+            Flatten(),
+            Dense(128, activation="relu"),
+            Dense(self.num_classes, activation="softmax")
+        ])
         return model, model.get_weights()
 
-    # -------------------------------------------------
-    # ConvNeXt (GENERALIZED & CORRECT)
-    # -------------------------------------------------
-    def make_convnext(self, variant="tiny", pretrained=True, fine_tune=False):
-        """
-        variant: 'tiny' | 'base' | 'BBC'
-        pretrained: use ImageNet weights or not
-        fine_tune: unfreeze backbone or not
-        """
-
-        if variant == "tiny":
-            backbone = tf.keras.applications.ConvNeXtTiny
-        elif variant == "base":
-            backbone = tf.keras.applications.ConvNeXtBase
-        elif variant == "BBC":
-            backbone = tf.keras.applications.ConvNeXtLarge
-        else:
-            raise ValueError("variant must be 'tiny' or 'base'")
+    # ---------------------------
+    # ConvNeXt
+    # ---------------------------
+    def make_convnext(self, variant="tiny", pretrained=False, fine_tune=False):
+        backbone = tf.keras.applications.ConvNeXtTiny
 
         base_model = backbone(
             weights="imagenet" if pretrained else None,
@@ -65,7 +37,6 @@ class ModelMaker:
             input_shape=self.input_shape
         )
 
-        # Freeze backbone for transfer learning
         base_model.trainable = fine_tune
 
         model = Sequential([
@@ -73,27 +44,15 @@ class ModelMaker:
             GlobalAveragePooling2D(),
             Dense(self.num_classes, activation="softmax")
         ])
-        
         return model, model.get_weights()
 
-    def from_config(self , config):
-        model = tf.keras.models.model_from_config(config)
-        return model
-
-    def build(self, model_type, **kwargs):
-        if model_type == "vanilla_cnn":
-            return self.vanilla_cnn(**kwargs)
-
-        elif model_type == "convnext":
+    # ---------------------------
+    # Build Interface
+    # ---------------------------
+    def build(self, model_type="convnext", **kwargs):
+        if model_type == "convnext":
             return self.make_convnext(**kwargs)
-
+        elif model_type == "vanilla":
+            return self.vanilla_cnn()
         else:
-            raise ValueError(f"Unknown model_type: {model_type}")
-
-    def get_model_metadata(self, model_type, **kwargs):
-        return {
-            "model_type": model_type,
-            "input_shape": self.input_shape,
-            "num_classes": self.num_classes,
-            **kwargs
-        }
+            raise ValueError("Unknown model type")
