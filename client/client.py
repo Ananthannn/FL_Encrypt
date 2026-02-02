@@ -1,35 +1,23 @@
 import tensorflow as tf
-import numpy as np
 from connection.client_conn import FLClient
 from model.model_maker import ModelMaker
 from model.train import train_model
-
 
 def build_model(meta):
     maker = ModelMaker(
         input_shape=tuple(meta["input_shape"]),
         num_classes=meta["num_classes"]
     )
-    model, _ = maker.build(
-        model_type=meta["model_type"],
-        variant=meta["variant"],
-        pretrained=meta["pretrained"],
-        fine_tune=meta["fine_tune"],
-    )
+    model, _ = maker.build(**meta)
     return model
-
 
 if __name__ == "__main__":
 
+    # Each client loads ITS OWN data
     (x, y), _ = tf.keras.datasets.cifar10.load_data()
 
-    # NEW: split dataset
-    client_id = int(input("Enter client id (1 or 2): "))
-    start = (client_id-1)*1000
-    end = client_id*1000
-
-    x = tf.image.resize(x[start:end] / 255.0, (224, 224))
-    y = tf.keras.utils.to_categorical(y[start:end], 10)
+    x = tf.image.resize(x[:1000]/255.0, (224,224))
+    y = tf.keras.utils.to_categorical(y[:1000], 10)
 
     client = FLClient()
     client.connect()
@@ -40,16 +28,16 @@ if __name__ == "__main__":
     global_weights = client.receive_global_weights()
     model.set_weights(global_weights)
 
-    print("🧠 Training locally")
+    print("🧠 Local training")
     local_weights, history = train_model(
         x, y, model,
         optimizer="adam",
         loss="categorical_crossentropy",
         metrics=("accuracy",),
-        epochs=1,
+        epochs=5,
         batch_size=8,
     )
 
-    print("📤 Sending update")
+    print("📤 Sending weights")
     client.send_local_weights(local_weights)
     client.close()
