@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.keras import Sequential
 from tensorflow.keras.layers import (
     Conv2D, MaxPooling2D, Flatten,
-    Dense, Dropout, GlobalAveragePooling2D
+    Dense, GlobalAveragePooling2D
 )
 
 class ModelMaker:
@@ -10,9 +10,9 @@ class ModelMaker:
         self.input_shape = input_shape
         self.num_classes = num_classes
 
-    # ---------------------------
-    # Vanilla CNN (NEW)
-    # ---------------------------
+    # --------------------------------------------------
+    # 1️⃣ Vanilla CNN (Baseline model)
+    # --------------------------------------------------
     def vanilla_cnn(self):
         model = Sequential([
             Conv2D(32, 3, activation="relu", input_shape=self.input_shape),
@@ -25,10 +25,10 @@ class ModelMaker:
         ])
         return model, model.get_weights()
 
-    # ---------------------------
-    # ConvNeXt
-    # ---------------------------
-    def make_convnext(self, variant="tiny", pretrained=False, fine_tune=False):
+    # --------------------------------------------------
+    # 2️⃣ ConvNeXt (Advanced model)
+    # --------------------------------------------------
+    def make_convnext(self, variant="tiny", pretrained=True, fine_tune=False):
         backbone = tf.keras.applications.ConvNeXtTiny
 
         base_model = backbone(
@@ -46,13 +46,13 @@ class ModelMaker:
         ])
         return model, model.get_weights()
 
-    # ---------------------------
-    # Build Interface
-    # ---------------------------
+    # --------------------------------------------------
+    # 3️⃣ Unified build interface
+    # --------------------------------------------------
     def build(self, model_type="convnext", **kwargs):
         if model_type == "convnext":
             return self.make_convnext(**kwargs)
         elif model_type == "vanilla":
             return self.vanilla_cnn()
         else:
-            raise ValueError("Unknown model type")
+            raise ValueError(f"Unknown model type: {model_type}")
