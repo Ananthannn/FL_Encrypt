@@ -1,36 +1,70 @@
+import numpy as np
 import tensorflow as tf
 from model.model_maker import ModelMaker
 from connection.server_conn import FLServer
 
+NUM_CLIENTS = 2
+ROUNDS = 2
+
+
+def fed_avg(client_weights):
+    new_weights = []
+    for weights in zip(*client_weights):
+        new_weights.append(np.mean(weights, axis=0))
+    return new_weights
+
+
 if __name__ == "__main__":
 
     MODEL_META = {
-        "model_type": "convnext",
+        "model_type": "vanilla",   # or "convnext"
         "variant": "tiny",
         "pretrained": False,
         "fine_tune": False,
-        "input_shape": (224, 224, 3),
+        "input_shape": (224,224,3),
         "num_classes": 10,
     }
 
     maker = ModelMaker(
         input_shape=MODEL_META["input_shape"],
-        num_classes=MODEL_META["num_classes"],
+        num_classes=MODEL_META["num_classes"]
     )
 
-    model, _ = maker.build("convnext")
+    model, global_weights = maker.build(
+        model_type=MODEL_META["model_type"],
+        variant=MODEL_META.get("variant"),
+        pretrained=MODEL_META.get("pretrained"),
+        fine_tune=MODEL_META.get("fine_tune"),
+    )
 
-    server = FLServer(model=model, model_meta=MODEL_META, max_clients=2)
+    model.set_weights(global_weights)
+    model.compile(
+        optimizer="adam",
+        loss="categorical_crossentropy",
+        metrics=["accuracy"]
+    )
 
-    (_, _), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
-    x_test = tf.image.resize(x_test[:2000]/255.0, (224,224))
-    y_test = tf.keras.utils.to_categorical(y_test[:2000],10)
+    server = FLServer(
+        model=model,
+        model_meta=MODEL_META,
+        max_clients=NUM_CLIENTS
+    )
 
-    for rnd in range(2):
-        print(f"\n🌍 Round {rnd+1}")
-        server.run_round(client_sizes=[1000, 1000])
+    for r in range(ROUNDS):
+        print(f"\n🌍 FL Round {r+1}")
+        print(f"⏳ Waiting for {NUM_CLIENTS} clients...")
 
-        loss, acc = model.evaluate(x_test, y_test, verbose=0)
-        print(f"🌍 Global Accuracy: {acc:.4f}")
+        # BLOCK until all clients connect and send updates
+        client_weights = server.run_round()
 
-    print("✅ Training finished")
+        # Safety check (important)
+        if len(client_weights) < NUM_CLIENTS:
+            raise RuntimeError("Not enough client updates received")
+
+        print("🔄 Aggregating updates")
+        new_weights = fed_avg(client_weights)
+
+        model.set_weights(new_weights)
+        print("✅ Global model updated")
+
+    print("\n🏁 Federated training complete")
