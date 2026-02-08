@@ -1,3 +1,5 @@
+import time
+
 def train_model(x, y, model, optimizer, loss, metrics, epochs, batch_size):
     model.compile(
         optimizer=optimizer,
@@ -5,11 +7,14 @@ def train_model(x, y, model, optimizer, loss, metrics, epochs, batch_size):
         metrics=list(metrics)
     )
 
-    model.fit(
+    start = time.time()
+    history = model.fit(
         x, y,
         epochs=epochs,
         batch_size=batch_size,
         verbose=1
     )
+    end = time.time()
 
-    return model.get_weights()
+    print(f"⏱ Training time: {end-start:.2f}s")
+    return model.get_weights(), history.history
