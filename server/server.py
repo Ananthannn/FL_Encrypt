@@ -1,5 +1,10 @@
 import numpy as np
 import tensorflow as tf
+
+import sys, pathlib
+
+sys.path.insert(0, str(pathlib.Path(_file_).resolve().parents[1]))
+
 from model.model_maker import ModelMaker
 from connection.server_conn import FLServer
 
@@ -14,10 +19,10 @@ def fed_avg(client_weights):
     return new_weights
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
 
     MODEL_META = {
-        "model_type": "vanilla",   # or "convnext"
+        "model_type": "light",   # or "convnext"
         "variant": "tiny",
         "pretrained": False,
         "fine_tune": False,
@@ -55,16 +60,26 @@ if __name__ == "__main__":
         print(f"⏳ Waiting for {NUM_CLIENTS} clients...")
 
         # BLOCK until all clients connect and send updates
-        client_weights = server.run_round()
+        # FLServer.run_round performs aggregation and returns the global weights
+        new_weights = server.run_round(client_sizes=[1000, 1000])
 
-        # Safety check (important)
-        if len(client_weights) < NUM_CLIENTS:
-            raise RuntimeError("Not enough client updates received")
+        # Basic sanity check
+        if not isinstance(new_weights, list) or len(new_weights) == 0:
+            raise RuntimeError("No aggregated weights returned by server")
 
-        print("🔄 Aggregating updates")
-        new_weights = fed_avg(client_weights)
-
-        model.set_weights(new_weights)
-        print("✅ Global model updated")
+        print("✅ Global model updated (aggregated on server)")
 
     print("\n🏁 Federated training complete")
+
+    # Evaluate global model on CIFAR-10 test set
+    try:
+        print("🔎 Evaluating global model on CIFAR-10 test set")
+        (_, _), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+        x_test = tf.image.resize(x_test/255.0, (224,224))
+        y_test = tf.keras.utils.to_categorical(y_test, 10)
+        loss, acc = model.evaluate(x_test, y_test, batch_size=32, verbose=0)
+        print(f"📈 Global model accuracy: {acc*100:.2f}% (loss: {loss:.4f})")
+    except Exception as e:
+        print("⚠️  Evaluation failed:", e)
+
+# End of server.py

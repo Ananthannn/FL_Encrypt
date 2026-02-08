@@ -2,10 +2,11 @@ import socket
 import json
 import pickle
 import struct
+import time
 
 
 class FLClient:
-    def __init__(self, server_ip="127.0.0.1", port=9999):
+    def _init_(self, server_ip="127.0.0.1", port=9999):
         self.server_ip = server_ip
         self.port = port
         self.sock = None
@@ -38,15 +39,21 @@ class FLClient:
     # ------------------------------
     # Protocol
     # ------------------------------
-    def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.server_ip, self.port))
+    def connect(self, retries=5, delay=1):
+        for i in range(retries):
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.connect((self.server_ip, self.port))
 
-        if self.sock.recv(16) != b"READY":
-            raise RuntimeError("Server not ready")
+                if self.sock.recv(16) != b"READY":
+                    raise RuntimeError("Server not ready")
 
-        self.sock.sendall(b"OK")
-        print("✅ Connected to server")
+                self.sock.sendall(b"OK")
+                print("✅ Connected to server")
+                return
+            except ConnectionRefusedError:
+                time.sleep(delay * (2**i))
+        raise ConnectionRefusedError("Could not connect after retries; is server running?")
 
     def receive_model_metadata(self):
         return self._recv_json()

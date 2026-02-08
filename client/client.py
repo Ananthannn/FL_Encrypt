@@ -1,4 +1,10 @@
+import sys
 import tensorflow as tf
+from pathlib import Path
+
+# Add the parent directory of 'client' to the search path
+path_root = Path(_file_).parents[1]
+sys.path.append(str(path_root))
 from connection.client_conn import FLClient
 from model.model_maker import ModelMaker
 from model.train import train_model
@@ -11,7 +17,7 @@ def build_model(meta):
     model, _ = maker.build(**meta)
     return model
 
-if __name__ == "__main__":
+if _name_ == "_main_":
 
     # Each client loads ITS OWN data
     (x, y), _ = tf.keras.datasets.cifar10.load_data()
