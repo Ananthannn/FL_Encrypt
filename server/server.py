@@ -43,4 +43,4 @@ if __name__ == "__main__":
         print(f"\n🌍 Round {rnd+1}")
         server.run_round(client_sizes=[1000, 1000])
 
-    print("\n✅ Training finished")
+    print("\n✅ Federated Training Finished")
