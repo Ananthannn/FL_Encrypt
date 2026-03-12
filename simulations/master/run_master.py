@@ -17,23 +17,30 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
 # Paths
 KEY_PATH = ROOT / "simulations" / "keys"
-MODEL_PATH = ROOT / "simulations" / "shared" / "model.npz"
-RECEIVED_DIR = ROOT / "simulations" / "shared"
-RECEIVED_DIR.mkdir(parents=True, exist_ok=True)
-STATE_PATH = RECEIVED_DIR / "master_state.json"
+MASTER_DIR = ROOT / "simulations" / "master"
+INITIAL_MODEL_PATH = MASTER_DIR / "initial_global" / "initial_global.pt"
+GLOBAL_MODEL_PATH = MASTER_DIR / "global_w" / "global_w.pt"
+STATE_PATH = MASTER_DIR / "master_state.json"
+# Ensure directories exist
+GLOBAL_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+INITIAL_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 async def main():
+    if not INITIAL_MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Initial global model not found: {INITIAL_MODEL_PATH}"
+    )
     # ---- CREATE SERVER ----
-    server = SecureServer(str(KEY_PATH), base_output=str(RECEIVED_DIR))
+    server = SecureServer(str(KEY_PATH), base_output=str(MASTER_DIR))
 
     # ---- CREATE ORCHESTRATOR ----
     orchestrator = Orchestrator(
         server=server,
         state_path=STATE_PATH,
-        model_path=MODEL_PATH
+        initial_model_path=INITIAL_MODEL_PATH,
+        global_model_path=GLOBAL_MODEL_PATH
     )
     # ---- STATUS PRINTING ----
     def print_status():

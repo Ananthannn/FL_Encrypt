@@ -5,7 +5,6 @@ import os
 import hashlib
 import sys
 from pathlib import Path
-from kimura.transport.tcp import TCPTransport
 from kimura.protocol.constants import ML_DSA_65_SIG_LEN, PROTOCOL_VERSION
 from kimura.file_transfer.transfer import chunked_send_file, recv_file
 # Fix imports for YOUR project structure
