@@ -4,8 +4,15 @@ import logging
 from pathlib import Path
 from kimura.session.manager import SessionManager
 from kimura.protocol.constants import DEFAULT_PORT
+from kimura.protocol.state_machine import ProtocolError
+from kimura.protocol.fl_protocol import FLMessageType, serialize_fl_message
 import warnings
-import json
+from kimura.protocol.fl_protocol import (
+    FLMessageType,
+    serialize_fl_message,
+    parse_fl_message
+)
+
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 logger = logging.getLogger(__name__)
 
@@ -31,7 +38,8 @@ class SecureClient:
         # 1. Handshake + READY
         await self.mgr.establish_channel(host=host, port=port)
         logger.info("Handshake complete with server")
-        await self.mgr.send_data(b'READY')
+        ready_msg = serialize_fl_message(FLMessageType.MODEL_LOADED, payload=b"")  # empty payload for ready
+        await self.mgr.send_data(ready_msg)
         logger.info("WORKER: Sent READY, waiting for master commands...")
         
         # 2. PERSISTENT event loop - NEVER exit
@@ -41,77 +49,60 @@ class SecureClient:
                 data = await self.mgr.recv_data()
                 logger.info(f"WORKER: Received {len(data)} bytes of data")
                 
-                # Try to parse as JSON for message type
+                # Parse as FL protocol message
                 try:
-                    msg_obj = json.loads(data.decode())
-                    msg_type = msg_obj.get("type")
-                    payload_hex = msg_obj.get("payload_hex")
-                    payload_text = msg_obj.get("payload", "")
-                    logger.info(f"WORKER: Parsed JSON message type='{msg_type}'")
-                    
-                    if msg_type == "MODEL_FILE":
-                        # Model file sent as hex in JSON
-                        if payload_hex:
-                            model_bytes = bytes.fromhex(payload_hex)
-                        elif payload_text:
-                            model_bytes = payload_text.encode()
-                        else:
-                            logger.error("WORKER: MODEL_FILE received but no payload found")
-                            continue
-                        
-                        logger.info(f"WORKER: Received MODEL_FILE ({len(model_bytes)} bytes)")
+                    msg_type, payload = parse_fl_message(data)
+                    logger.info(f"WORKER: Received FL message type={msg_type.name}, {len(payload)} bytes")
+
+                    if msg_type == FLMessageType.MODEL_FILE:
+                        model_bytes = payload
                         model_path = Path(initial_model_path)
                         with open(model_path, "wb") as f:
                             f.write(model_bytes)
-                        logger.info(f"WORKER: Saved model {model_path}")
-                        
-                        # Train immediately when model received
+                        logger.info(f"WORKER: Saved MODEL_FILE ({len(model_bytes)} bytes) to {model_path}")
+
+                        # Train immediately
                         updated_bytes = await self.weights_callback(model_bytes, self.current_round)
-                        await self._send_update_json(updated_bytes, round_no=self.current_round)
-                        self.current_round += 1 
-                        
-                    elif msg_type == "AGGREGATED_MODEL":
-                        # Model file sent as hex in JSON
-                        if payload_hex:
-                            model_bytes = bytes.fromhex(payload_hex)
-                        elif payload_text:
-                            model_bytes = payload_text.encode()
-                        else:
-                            logger.error("WORKER: AGGREGATED_MODEL received but no payload found")
-                            continue
-                        
-                        logger.info(f"WORKER: Received AGGREGATED_MODEL ({len(model_bytes)} bytes)")
+                        await self._send_update_binary(updated_bytes, round_no=self.current_round)
+                        self.current_round += 1
+
+                    elif msg_type == FLMessageType.AGGREGATED_MODEL:
+                        model_bytes = payload
                         model_path = Path(initial_model_path)
                         with open(model_path, "wb") as f:
                             f.write(model_bytes)
-                        logger.info("WORKER: New global model saved, ready for next round")
+                        logger.info(f"WORKER: Saved AGGREGATED_MODEL ({len(model_bytes)} bytes) to {model_path}")
+
                     else:
-                        logger.debug(f"WORKER: Ignoring unknown message type '{msg_type}'")
-                        
-                except (json.JSONDecodeError, ValueError) as e:
-                    # Not JSON - might be raw binary data (shouldn't happen with this protocol)
-                    logger.debug(f"WORKER: Received {len(data)} bytes of raw data (not JSON): {e}")
-                    
+                        logger.debug(f"WORKER: Ignoring unknown FLMessageType {msg_type}")
+
+                except Exception as e:
+                    logger.error(f"WORKER: Failed to parse FL message: {e}", exc_info=True)
+
+                
+            except ProtocolError as e:
+                if "Connection closed by peer" in str(e):
+                    logger.info("WORKER: Master disconnected — shutting down ")
+                    break
+                else:
+                    logger.error(f"Protocol error: {e}", exc_info=True)
+                    break     
             except Exception as e:
                 logger.error(f"WORKER loop error: {e}", exc_info=True)
                 await asyncio.sleep(1)  # Retry
 
-
-
-    async def _send_update_json(self, weights: bytes, round_no: int):
-        """
-        Wrap weights in JSON with round_no and send.
-        """
+    async def _send_update_binary(self, weights: bytes, round_no: int):
         if not self.mgr:
             raise RuntimeError("SessionManager not initialized")
 
-        payload = {
-            "round_no": round_no,
-            "weights": weights.hex()
-        }
-        await self.mgr.send_data(json.dumps(payload).encode())
-        logger.info(f"WORKER: Sent {len(weights)/1024/1024:.3f} MB for round {round_no}")
-    
+        fl_bytes = serialize_fl_message(
+            FLMessageType.UPDATE,
+            weights
+        )
+
+        await self.mgr.send_data(fl_bytes)
+        logger.info(f"WORKER: Sent {len(weights)/1024:.1f} KB for round {round_no}")
+
     # -----------------------------
     # Send updated gradients / weights
     # -----------------------------

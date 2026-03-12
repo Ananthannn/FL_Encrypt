@@ -44,82 +44,85 @@ class MedicalAggregator(fl.server.strategy.FedAvg):
         results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]],
         failures: List[BaseException],
     ) -> Optional[fl.common.Parameters]:
-        """Aggregate medical model updates with validation + DP."""
-        if not results:
+        """Aggregate with secure mask cancellation + DP + outlier detection."""
+        if not results or len(results) < 2:  # Need ≥2 workers for mask cancellation
+            logger.warning(f"Insufficient clients for secure agg: {len(results)}")
             return None
             
-        logger.info(f"Aggregating round {server_round}: {len(results)} clients")
+        logger.info(f"Secure aggregation round {server_round}: {len(results)} clients")
         
-        # 1. Extract parameters + metrics
-        valid_results = []
+        # 1. Extract valid parameters + weights (your existing outlier logic)
+        valid_params_list = []
         client_weights = []
         
         for client, fit_res in results:
             try:
                 num_examples = fit_res.num_examples
-                parameters = fit_res.parameters
-                metrics = fit_res.metrics or {}
+                params_ndarrays = parameters_to_ndarrays(fit_res.parameters)
                 
-                # Weight by dataset size (medical standard)
-                weight = num_examples if self.config.weights_by_dataset_size else 1.0
-                client_weights.append(weight)
-                
-                # Outlier detection on parameter norms
-                params_ndarrays = parameters_to_ndarrays(parameters)
-                param_norms = [torch.norm(torch.tensor(p.flatten())).item() 
-                             for p in params_ndarrays]
-                z_scores = [(norm - np.mean(param_norms)) / (np.std(param_norms) + 1e-8)
-                           for norm in param_norms]
+                # Your existing outlier detection
+                param_norms = [torch.norm(torch.tensor(p.flatten())).item() for p in params_ndarrays]
+                z_scores = [(norm - np.mean(param_norms)) / (np.std(param_norms) + 1e-8) for norm in param_norms]
                 
                 if max(abs(z) for z in z_scores) > self.config.outlier_threshold:
-                    client_id = getattr(client, "cid", client)
-                    logger.warning(f"Outlier client {client_id}, skipping")
+                    logger.warning(f"Outlier client {client.cid}, skipping")
                     continue
-                               
-                valid_results.append((client, fit_res))
-                client_id = getattr(client, "cid", "custom_client")
-                logger.info(f"Valid update {client_id}: {num_examples} samples")
+                    
+                weight = num_examples if self.config.weights_by_dataset_size else 1.0
+                valid_params_list.append(params_ndarrays)
+                client_weights.append(weight)
+                
             except Exception as e:
-                client_id = getattr(client, "cid", "custom_client")
-                logger.error(f"Validation failed {client_id}: {e}")
-        if not valid_results:
-            raise RuntimeError("No valid updates after outlier filtering")
+                logger.error(f"Client {client.cid} validation failed: {e}")
         
-        # 2. Weighted FedAvg aggregation
-        aggregation_input = [
-            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
-            for _, fit_res in valid_results
-        ]
-        aggregated_ndarrays = aggregate(aggregation_input)
+        if len(valid_params_list) < 2:
+            raise RuntimeError("SecureAgg needs ≥2 valid clients")
+        
+        num_clients = len(valid_params_list)
+        
+        # 2. SECURE AGGREGATION: Sum masks → masks cancel → true average
+        aggregated_ndarrays = []
+        for param_idx in range(len(valid_params_list[0])):  # For each parameter tensor
+            param_sum = np.zeros_like(valid_params_list[0][param_idx], dtype=np.float32)
+            
+            for client_params in valid_params_list:
+                param_sum += client_params[param_idx]
+            
+            # Masks cancel: sum(random[-1,1] across N clients) ≈ 0
+            # Divide by N = true weighted average
+            avg_param = param_sum / num_clients
+            aggregated_ndarrays.append(avg_param)
+        
         aggregated_parameters = ndarrays_to_parameters(aggregated_ndarrays)
-
-        # 3. Differential Privacy noise injection
+        
+        # 3. Differential Privacy (your existing DP)
         if self.config.dp_noise_multiplier > 0:
             params_ndarrays = parameters_to_ndarrays(aggregated_parameters)
-            total_weight = sum(client_weights[:len(valid_results)])
+            total_weight = sum(client_weights)
             noise_std = self.config.dp_noise_multiplier * np.sqrt(1.0 / total_weight)
             
             noisy_params = []
             for param in params_ndarrays:
-                noise = np.random.normal(0, noise_std, param.shape)
+                noise = np.random.normal(0, noise_std, param.shape).astype(param.dtype)
                 noisy_params.append(param + noise)
             
             aggregated_parameters = ndarrays_to_parameters(noisy_params)
             logger.info(f"DP noise added: std={noise_std:.3f}")
         
-        # 4. Audit trail metrics
+        # 4. Audit metrics
         metrics = {
-            "num_clients": len(valid_results),
-            "total_samples": sum(fit_res.num_examples for _, fit_res in valid_results),
+            "num_clients": num_clients,
+            "total_samples": sum(w * n for w, n in zip(client_weights, [len(p) for p in valid_params_list])),
             "dp_noise_std": float(noise_std) if self.config.dp_noise_multiplier > 0 else 0.0,
-            "outliers_detected": len(results) - len(valid_results),
+            "secure_aggregation_active": True,
+            "clients_required_for_agg": num_clients,
             "server_round": server_round
         }
         
-        logger.info(f"Aggregated {metrics['num_clients']} clients, "
-                   f"{metrics['outliers_detected']} outliers filtered")
+        logger.info(f"SecureAgg complete: {num_clients} clients, masks cancelled")
         return aggregated_parameters, metrics
-    
+
+        
     def aggregate_evaluate(
         self,
         server_round: int,

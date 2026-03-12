@@ -5,9 +5,12 @@ import logging
 from pathlib import Path
 from kimura.session.manager import SessionManager
 from kimura.protocol.constants import DEFAULT_PORT
-from shared.state import WorkerState
 import warnings
-
+from kimura.protocol.fl_protocol import (
+    FLMessageType,
+    serialize_fl_message,
+    parse_fl_message
+)
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 
 logging.basicConfig(
@@ -62,13 +65,25 @@ class SecureServer:
                     # Use timeout to allow server to send files between receives
                     data = await asyncio.wait_for(mgr.recv_data(), timeout=60.0)
                     # Check if worker is signaling READY for initial task
-                    if data == b'READY':
+                    try:
+                        if not data:
+                            continue
+                        msg_type, payload = parse_fl_message(data)
+                    except Exception as e:
+                        logger.error(f"Invalid FL message from {worker_id}: {e}")
+                        continue
+
+                    if msg_type == FLMessageType.MODEL_LOADED:
                         if self.on_worker_ready:
-                            await self.on_worker_ready(worker_id, data)
-                    else:
-                        # Regular result/update from worker
+                            await self.on_worker_ready(worker_id, payload)
+
+                    elif msg_type == FLMessageType.UPDATE:
                         if self.on_result_received:
-                            await self.on_result_received(worker_id, data)
+                            await self.on_result_received(worker_id, payload)
+
+                    else:
+                        logger.warning(f"Unhandled message {msg_type} from {worker_id}")
+
                 except asyncio.TimeoutError:
                     # Worker is idle, but connection is still alive - continue listening
                     await asyncio.sleep(0.1)
@@ -96,27 +111,17 @@ class SecureServer:
             except:
                 pass
 
-    async def send_to_worker(self, worker_id: str, payload: bytes, msg_type: str = None):
+    async def send_to_worker(self, worker_id: str, msg_type: FLMessageType, payload: bytes):
         if worker_id not in self.active_clients:
             logger.warning(f"Worker {worker_id} not active")
             return
         _, writer, mgr = self.active_clients[worker_id]
-
-        if msg_type:
-            # Only include payload in JSON if it's not empty and can be decoded
-            msg_obj = {"type": msg_type}
-            if payload:
-                try:
-                    msg_obj["payload"] = payload.decode()
-                except (UnicodeDecodeError, AttributeError):
-                    # If binary data, send as hex
-                    msg_obj["payload_hex"] = payload.hex()
-            msg = json.dumps(msg_obj).encode()
-        else:
-            msg = payload
-
-        await mgr.send_data(msg)
-        logger.info(f"Sent {msg_type or 'payload'} to Worker {worker_id}")
+        try:
+            fl_bytes = serialize_fl_message(msg_type, payload)
+            await mgr.send_data(fl_bytes)
+            logger.info(f"Sent {msg_type.name} to Worker {worker_id}")
+        except Exception as e:
+            logger.error(f"Failed to send {msg_type.name} to {worker_id}: {e}")
 
     # ===============================
     # SERVER LOOP
@@ -151,7 +156,11 @@ class SecureServer:
             try:
                 # Check if connection alive + handshake complete
                 if mgr.state_machine.is_ready_for_protected():
-                    await mgr.send_data(weights)
+                    fl_bytes = serialize_fl_message(
+                        FLMessageType.AGGREGATED_MODEL,
+                        weights
+                    )
+                    await mgr.send_data(fl_bytes)
                     sent_count += 1
                 else:
                     logger.warning(f"Worker {worker_id} not ready")

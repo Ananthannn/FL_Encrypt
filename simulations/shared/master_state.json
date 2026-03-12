@@ -1,8 +1,8 @@
 {
-  "round": 9,
+  "round": 0,
   "workers": {
-    "726a42014a0c6d90": "READY",
-    "02bce76d59e9bea8": "READY"
+    "b6cef734e8ee11bb": "TRAINING",
+    "8ec723bf67bf58f5": "TRAINING"
   },
   "results_received": []
 }
