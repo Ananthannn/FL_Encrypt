@@ -6,14 +6,13 @@ from pathlib import Path
 NUM_CLASSES = 4
 
 BASE_DIR = Path(__file__).resolve().parent
-WEIGHTS_PATH = BASE_DIR.parent / "model" / "convnext_large.pt"
-
+WEIGHTS_PATH = BASE_DIR.parent / "model" / "convnextv2_base_fcmae384.pt"
 
 def get_model(device="cuda"):
 
     # create architecture
     model = timm.create_model(
-        "convnext_large",
+        "convnextv2_base.fcmae_ft_in22k_in1k_384",
         pretrained=False
     )
     # get input size of classifier

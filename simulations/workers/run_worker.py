@@ -13,6 +13,8 @@ import psutil
 import pynvml
 from train import train, load_data
 from model import get_model
+from flwr.common import ndarrays_to_parameters
+import pickle
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from kimura.session.worker import SecureClient
@@ -24,7 +26,7 @@ from kimura.protocol.fl_protocol import FLMessageType, parse_fl_message
 # Local cache folder for storing received weights
 CACHE_DIR = ROOT / "simulations" / "workers" / "cache_weights"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-cached_model_path = CACHE_DIR / "model.pt"
+cached_model_path = CACHE_DIR / "cached_model.pt"
 
 async def training(weights_bytes: bytes, round_no: int) -> bytes:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,7 +56,7 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
     # ------------------------
     state_dict = torch.load(io.BytesIO(raw_bytes), map_location=DEVICE)
     model = get_model(DEVICE)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     loader = load_data(DATA_PATH)
     # ------------------------
     # W&B init (once per worker)
@@ -77,15 +79,7 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
     end = time.time()
 
     # SECURE AGGREGATION: Add random mask
-    mask = {}
-    local_update = {}
-    for name, param in model.state_dict().items():
-        # Generate random mask (same shape, uniform [-1,1])
-        mask[name] = torch.rand_like(param) * 2 - 1
-        # Store true local update
-        local_update[name] = param.clone()
-        # Apply mask to param to send
-        param.add_(mask[name])
+
     # ------------------------
     # System metrics
     # ------------------------
@@ -103,14 +97,11 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
         **gpu
     })
     # Save CLEAN model to cache (for next round's initial model)
-    torch.save(local_update, cached_model_path)
-    # ----------------------
-    # Return updated weights
-    # ----------------------
-     # Return MASKED model state_dict
-    out = io.BytesIO()
-    torch.save(model.state_dict(), out) # This has masks applied
-    return out.getvalue()
+    torch.save(model.state_dict(), cached_model_path)
+    params = [p.detach().cpu().numpy() for p in model.state_dict().values()]
+    parameters = ndarrays_to_parameters(params)
+    num_examples = len(loader.dataset)
+    return pickle.dumps((parameters, num_examples))
 
 async def main():
     key_path = ROOT / "simulations" / "keys"

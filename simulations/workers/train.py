@@ -5,12 +5,13 @@ import torch.nn as nn
 import torch.optim as optim
 from opacus import PrivacyEngine
 from model import get_model
+from opacus.utils.batch_memory_manager import BatchMemoryManager
 
-
-BATCH_SIZE = 8
-EPOCHS = 3
+BATCH_SIZE = 2
+EPOCHS = 1
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+from torch.utils.data import DataLoader, Subset
+import random
 
 def load_data(data_dir):
 
@@ -32,10 +33,22 @@ def load_data(data_dir):
     dataset = datasets.ImageFolder(
         root=data_dir,
         transform=transform
-    )
+        )
+
+    # ---- pick 10 images per class ----
+    class_indices = {i: [] for i in range(len(dataset.classes))}
+
+    for idx, (_, label) in enumerate(dataset.samples):
+        class_indices[label].append(idx)
+
+    selected_indices = []
+    for cls in class_indices:
+        selected_indices += random.sample(class_indices[cls], 10)
+
+    subset = Subset(dataset, selected_indices)
 
     loader = DataLoader(
-        dataset,
+        subset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=4,
@@ -61,23 +74,21 @@ def train(model, loader, device):
     # ------------------------
     # Differential Privacy Engine
     # ------------------------
-    privacy_engine = PrivacyEngine(
-        model,
-        batch_size=loader.batch_size,
-        sample_size=len(loader.dataset),
-        alphas=[10, 100],
-        noise_multiplier=1.1,  # adjust for target epsilon
-        max_grad_norm=1.0,
+    privacy_engine = PrivacyEngine()
+    model, optimizer, loader = privacy_engine.make_private(
+        module=model,
+        optimizer=optimizer,
+        data_loader=loader,
+        noise_multiplier=1.1,
+        max_grad_norm=0.5,
+        poisson_sampling=False,
     )
-    privacy_engine.attach(optimizer)
 
     # cosine LR schedule
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=EPOCHS
     )
-    # mixed precision scaler
-    scaler = torch.amp.GradScaler("cuda")
     model.train()
     for epoch in range(EPOCHS):
         running_loss = 0
@@ -87,13 +98,10 @@ def train(model, loader, device):
             images = images.to(device)
             labels = labels.to(device)
             optimizer.zero_grad()
-            # mixed precision forward
-            with torch.amp.autocast("cuda"):
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
             running_loss += loss.item()
             # accuracy
             _, preds = torch.max(outputs, 1)
