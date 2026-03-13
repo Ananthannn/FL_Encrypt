@@ -16,7 +16,7 @@ def load_data(data_dir):
 
     transform = transforms.Compose([
         transforms.Grayscale(num_output_channels=3),
-        transforms.Resize((256,256)),
+        transforms.Resize((384,384)),
         transforms.RandomResizedCrop(192, scale=(0.7,1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(20),

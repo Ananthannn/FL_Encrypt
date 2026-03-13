@@ -7,7 +7,6 @@ import warnings
 import sys
 import io
 import time
-import numpy as np
 import torch
 import wandb
 import psutil
@@ -21,7 +20,7 @@ from kimura.protocol.constants import DEFAULT_PORT
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+from kimura.protocol.fl_protocol import FLMessageType, parse_fl_message
 # Local cache folder for storing received weights
 CACHE_DIR = ROOT / "simulations" / "workers" / "cache_weights"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -45,9 +44,15 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
             "gpu_temperature": temp,
         }
     # ------------------------
+    # Deserialize FL message
+    # ------------------------
+    msg_type, raw_bytes = parse_fl_message(weights_bytes)
+    if msg_type != FLMessageType.MODEL_FILE:
+        raise ValueError(f"Expected MODEL_FILE message, got {msg_type}")
+    # ------------------------
     # Load incoming weights
     # ------------------------
-    state_dict = torch.load(io.BytesIO(weights_bytes), map_location=DEVICE)
+    state_dict = torch.load(io.BytesIO(raw_bytes), map_location=DEVICE)
     model = get_model(DEVICE)
     model.load_state_dict(state_dict)
     loader = load_data(DATA_PATH)
