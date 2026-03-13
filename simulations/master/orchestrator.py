@@ -19,10 +19,30 @@ from typing import Dict, Any
 from shared.state import MasterState, WorkerState
 from flwr.common import FitRes, ndarrays_to_parameters, Status, Code, parameters_to_ndarrays
 import io
+import pickle
+import torch
 from kimura.protocol.fl_protocol import FLMessageType, serialize_fl_message
 import numpy as np
 logger = logging.getLogger("orchestrator")
 from simulations.master.aggregator import create_med_strat
+
+from flwr.server.client_proxy import ClientProxy
+from flwr.common import GetPropertiesRes, Status, Code
+class DummyClientProxy(ClientProxy):
+    def __init__(self, cid):
+        super().__init__(cid)
+
+    def get_parameters(self, ins, timeout): raise NotImplementedError()
+    def fit(self, ins, timeout): raise NotImplementedError()
+    def evaluate(self, ins, timeout): raise NotImplementedError()
+    def reconnect(self, ins, timeout): raise NotImplementedError()
+    def get_properties(self, ins, timeout):
+        # Return empty properties since you don't use them
+        return GetPropertiesRes(
+            status=Status(code=Code.OK, message=""),
+            properties={}
+        )
+
 # ============================================================
 # ORCHESTRATOR CORE
 # ============================================================
@@ -266,36 +286,36 @@ class Orchestrator:
         if not self.results:
             logger.warning("No results yet, waiting for workers...")
             return None
-
         flower_results = []
         for worker_id, payload_bytes in self.results.items():
-            # 1️⃣ Ensure this is raw NPZ bytes
+            # Ensure valid type
             if not isinstance(payload_bytes, (bytes, bytearray)):
-                logger.error(f"Worker {worker_id} returned unexpected type {type(payload_bytes)}")
+                logger.error(
+                    f"Worker {worker_id} returned unexpected type {type(payload_bytes)}"
+                )
                 continue
-
-            # 2️⃣ Load NPZ
-            buffer = io.BytesIO(payload_bytes)
-            arr = np.load(buffer, allow_pickle=True)
-
-            # 3️⃣ Extract arrays in consistent order
-            ndarrays = [arr[k] for k in sorted(arr.files)]
-
-            # 4️⃣ Set num_examples (temporary equal weighting)
-            num_examples = 1
-
-            # 5️⃣ Convert to Flower Parameters
-            parameters = ndarrays_to_parameters(ndarrays)
-
-            # 6️⃣ Wrap into FitRes
+            try:
+                # Deserialize Flower Parameters sent by worker
+                parameters, num_examples = pickle.loads(payload_bytes)
+            except Exception as e:
+                logger.error(f"Failed to deserialize update from {worker_id}: {e}")
+                continue
+            # Equal weighting for now
+            proxy = DummyClientProxy(worker_id)
+            # Wrap into Flower FitRes
             fit_res = FitRes(
                 status=Status(code=Code.OK, message=""),
                 parameters=parameters,
                 num_examples=num_examples,
                 metrics={},
             )
-            flower_results.append((worker_id, fit_res))
+            flower_results.append((proxy, fit_res))
 
+        if not flower_results:
+            logger.error("No valid worker updates received")
+            return None
+
+        # Flower strategy aggregation (FedAvg)
         aggregated = self.strategy.aggregate_fit(
             server_round=self.round,
             results=flower_results,
@@ -303,18 +323,32 @@ class Orchestrator:
         )
 
         if aggregated is None:
+            logger.warning("Aggregation returned None")
             return None
 
         aggregated_params, metrics = aggregated
+
+        # Convert aggregated parameters → numpy arrays
         ndarrays = parameters_to_ndarrays(aggregated_params)
 
-        # Serialize to bytes (same format workers expect)
+        # Convert numpy arrays → PyTorch state_dict
+        model_path = self.global_model_path if self.round > 0 else self.initial_model_path
+        state_dict = torch.load(model_path)
+
+        for k, v in zip(state_dict.keys(), ndarrays):
+            state_dict[k] = torch.tensor(v)
+
+        # Save new global model
+        torch.save(state_dict, self.global_model_path)
+
+        # Send model bytes back to workers
         buffer = io.BytesIO()
-        np.savez(buffer, *ndarrays)
+        torch.save(state_dict, buffer)
         buffer.seek(0)
         serialized_bytes = buffer.getvalue()
 
         logger.info(f"Aggregation complete: {metrics}")
+
         return serialized_bytes
 
             
@@ -326,16 +360,15 @@ class Orchestrator:
             logger.warning("No state_path set; skipping output write")
             return
 
-        out_dir = self.state_path.parent
-        out_path = out_dir / f"aggregated_round_{self.round}.npz"
-
-        with open(out_path, "wb") as f:
-            f.write(final_output)
-
-        logger.info(f"Aggregated model written to {out_path}")
+        # Skip writing the .npz completely
+        # out_dir = self.state_path.parent
+        # out_path = out_dir / f"aggregated_round_{self.round}.npz"
+        # with open(out_path, "wb") as f:
+        #     f.write(final_output)
+        # logger.info(f"Aggregated model written to {out_path}")
 
         self.results.clear()
-        self._save_state()
+        self._save_state()  # you can keep this if you still want internal state persistence
 
     async def on_worker_ready(self, worker_id: str, msg: bytes) -> None:
         logger.info(f"Worker {worker_id} sent READY")
@@ -376,7 +409,11 @@ class Orchestrator:
             logger.info(f"[MASTER] Broadcasting to {worker_id}, current state: {state}")
             if state == WorkerState.WAITING_FOR_AGGREGATE:
                 logger.info(f"[MASTER] Sending aggregated model ({len(final_output)} bytes) to {worker_id}")
-                await self.server.send_to_worker(worker_id, final_output, msg_type="AGGREGATED_MODEL")
+                await self.server.send_to_worker(
+                    worker_id,
+                    FLMessageType.AGGREGATED_MODEL,
+                    final_output
+                )
                 logger.info(f"Aggregated model sent to {worker_id}")
                 self.workers[worker_id] = WorkerState.READY
             else:

@@ -19,6 +19,7 @@ from flwr.server.strategy.aggregate import aggregate
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class AggregationConfig:
     """Configuration for secure medical aggregation."""
@@ -59,21 +60,17 @@ class MedicalAggregator(fl.server.strategy.FedAvg):
             try:
                 num_examples = fit_res.num_examples
                 params_ndarrays = parameters_to_ndarrays(fit_res.parameters)
-                
+                for p in params_ndarrays:
+                    if p.dtype.type is np.bytes_:
+                        raise ValueError("Received byte array instead of numeric tensor")
                 # Your existing outlier detection
-                param_norms = [torch.norm(torch.tensor(p.flatten())).item() for p in params_ndarrays]
-                z_scores = [(norm - np.mean(param_norms)) / (np.std(param_norms) + 1e-8) for norm in param_norms]
-                
-                if max(abs(z) for z in z_scores) > self.config.outlier_threshold:
-                    logger.warning(f"Outlier client {client.cid}, skipping")
-                    continue
-                    
                 weight = num_examples if self.config.weights_by_dataset_size else 1.0
                 valid_params_list.append(params_ndarrays)
                 client_weights.append(weight)
                 
             except Exception as e:
-                logger.error(f"Client {client.cid} validation failed: {e}")
+                cid = getattr(client, "cid", str(client))
+                logger.error(f"Client {cid} validation failed: {e}")
         
         if len(valid_params_list) < 2:
             raise RuntimeError("SecureAgg needs ≥2 valid clients")

@@ -47,24 +47,17 @@ async def main():
         logger.info(f"[MASTER] Workers connected: {len(orchestrator.workers)}")
         logger.info(f"[MASTER] MasterState: {orchestrator.master_state.value}")
 
-
     async def on_result_received(client_id, data_bytes):
         try:
-            payload = json.loads(data_bytes)
-            round_no = payload["round_no"]
-            weights = bytes.fromhex(payload["weights"])
+            round_no = orchestrator.round   # assume worker sent correct round
+            await orchestrator.receive_result(client_id, data_bytes, round_no)
         except Exception as e:
             logger.error(f"Bad update from {client_id}: {e}")
-            return
-
-        # Forward to orchestrator ONLY
-        await orchestrator.receive_result(client_id, weights, round_no)
 
     async def control_server(orchestrator):
         async def handle(reader, writer):
             line = await reader.readline()
             cmd = line.decode().strip()
-
             if cmd.startswith("START"):
                 # Instead of checking master_state, check training_active
                 if orchestrator.training_active:

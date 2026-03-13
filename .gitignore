@@ -68,7 +68,7 @@ cover/
 # Translations
 *.mo
 *.pot
-
+simulations/workers/wandb/
 # Django stuff:
 *.log
 local_settings.py
