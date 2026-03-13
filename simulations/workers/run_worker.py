@@ -26,7 +26,7 @@ from kimura.protocol.fl_protocol import FLMessageType, parse_fl_message
 # Local cache folder for storing received weights
 CACHE_DIR = ROOT / "simulations" / "workers" / "cache_weights"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-cached_model_path = CACHE_DIR / "cached_model.pt"
+cached_model_path = CACHE_DIR / "cached_weights.pt"
 
 async def training(weights_bytes: bytes, round_no: int) -> bytes:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
