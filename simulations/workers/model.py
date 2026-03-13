@@ -6,7 +6,7 @@ from pathlib import Path
 NUM_CLASSES = 4
 
 BASE_DIR = Path(__file__).resolve().parent
-WEIGHTS_PATH = BASE_DIR.parent / "model" / "convnext_bbc.pt"
+WEIGHTS_PATH = BASE_DIR.parent / "model" / "convnext_large.pt"
 
 
 def get_model(device="cuda"):
