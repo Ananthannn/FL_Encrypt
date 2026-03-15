@@ -32,7 +32,7 @@ class SecureClient:
     # -----------------------------
     # Persistent FL Connection
     # -----------------------------
-    async def connect_fl(self, host: str, port: int = DEFAULT_PORT, initial_model_path: str = "model.npz"):
+    async def connect_fl(self, host: str, port: int = DEFAULT_PORT):
         self.mgr = SessionManager("client", self.key_path)
         
         # 1. Handshake + READY
@@ -56,30 +56,19 @@ class SecureClient:
 
                     if msg_type == FLMessageType.MODEL_FILE:
                         model_bytes = payload
-                        model_path = Path(initial_model_path)
-                        with open(model_path, "wb") as f:
-                            f.write(model_bytes)
-                        logger.info(f"WORKER: Saved MODEL_FILE ({len(model_bytes)} bytes) to {model_path}")
-
+                        logger.info(f"WORKER: Received MODEL_FILE ({len(model_bytes)} bytes), training now...")
                         # Train immediately
                         updated_bytes = await self.weights_callback(model_bytes, self.current_round)
                         await self._send_update_binary(updated_bytes, round_no=self.current_round)
                         self.current_round += 1
-
                     elif msg_type == FLMessageType.AGGREGATED_MODEL:
                         model_bytes = payload
-                        model_path = Path(initial_model_path)
-                        with open(model_path, "wb") as f:
-                            f.write(model_bytes)
-                        logger.info(f"WORKER: Saved AGGREGATED_MODEL ({len(model_bytes)} bytes) to {model_path}")
-
+                        logger.info(f"WORKER: Received AGGREGATED_MODEL ({len(model_bytes)} bytes), training now...")
                     else:
                         logger.debug(f"WORKER: Ignoring unknown FLMessageType {msg_type}")
-
                 except Exception as e:
                     logger.error(f"WORKER: Failed to parse FL message: {e}", exc_info=True)
 
-                
             except ProtocolError as e:
                 if "Connection closed by peer" in str(e):
                     logger.info("WORKER: Master disconnected — shutting down ")
