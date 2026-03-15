@@ -3,7 +3,7 @@ import asyncio
 import logging
 from pathlib import Path
 import sys
-
+import os
 # --- PROJECT ROOT ---
 ROOT = Path(__file__).resolve().parents[2]  # points to FL_Encrypt/
 sys.path.insert(0, str(ROOT))
@@ -25,7 +25,7 @@ async def main():
     # ---- CONFIG ----
     key_path = ROOT / "simulations" / "keys"  # path to your PQC keys
     file_to_send = ROOT / "simulations" / "shared" / "new_file.bin"
-    master_host = "127.0.0.1"
+    master_host = os.getenv("FL_MASTER", "127.0.0.1") #run this FL_MASTER=192.168.0.101 python worker.py
     master_port = DEFAULT_PORT
 
     if not file_to_send.exists():
