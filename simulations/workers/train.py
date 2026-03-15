@@ -8,7 +8,7 @@ from model import get_model
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 BATCH_SIZE = 2
-EPOCHS = 1
+EPOCHS = 2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 from torch.utils.data import DataLoader, Subset
 import random

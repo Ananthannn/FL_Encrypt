@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 
 import asyncio
+import json
+import json
 import logging
 from pathlib import Path
 import warnings
 import sys
 import io
 import time
+import lz4.frame
 import torch
 import wandb
 import psutil
 import pynvml
-from train import train, load_data
+import model
+from train import DEVICE, train, load_data
 from model import get_model
-from flwr.common import ndarrays_to_parameters
-import pickle
+import signal
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from kimura.session.worker import SecureClient
@@ -23,10 +26,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 from kimura.protocol.fl_protocol import FLMessageType, parse_fl_message
-# Local cache folder for storing received weights
-CACHE_DIR = ROOT / "simulations" / "workers" / "cache_weights"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-cached_model_path = CACHE_DIR / "cached_weights.pt"
 
 async def training(weights_bytes: bytes, round_no: int) -> bytes:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,9 +53,13 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
     # ------------------------
     # Load incoming weights
     # ------------------------
-    state_dict = torch.load(io.BytesIO(raw_bytes), map_location=DEVICE)
+    decompressed = lz4.frame.decompress(raw_bytes)
+    incoming_state_dict = {k: v.float() for k, v in torch.load(io.BytesIO(decompressed), map_location=DEVICE).items()}
+    # Strip _module. prefix if present
+    if list(incoming_state_dict.keys())[0].startswith("_module."):
+        incoming_state_dict = {k.replace("_module.", ""): v for k, v in incoming_state_dict.items()}
     model = get_model(DEVICE)
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(incoming_state_dict, strict=False)
     loader = load_data(DATA_PATH)
     # ------------------------
     # W&B init (once per worker)
@@ -96,12 +99,25 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
         "ram_usage_percent": ram,
         **gpu
     })
-    # Save CLEAN model to cache (for next round's initial model)
-    torch.save(model.state_dict(), cached_model_path)
-    params = [p.detach().cpu().numpy() for p in model.state_dict().values()]
-    parameters = ndarrays_to_parameters(params)
-    num_examples = len(loader.dataset)
-    return pickle.dumps((parameters, num_examples))
+    # ------------------------
+    # Compute ΔW relative to the server model just received
+    # ------------------------
+    old_state_dict = incoming_state_dict
+    new_state_dict = model.state_dict()
+    # Compute delta only on keys present in both
+    common_keys = old_state_dict.keys() & new_state_dict.keys()
+    # Keep full precision CPU tensors for deltas
+    delta_weights = {k: new_state_dict[k].cpu() - old_state_dict[k].cpu() for k in common_keys}
+    # Include number of training samples
+    payload_dict = {
+        "delta": delta_weights,
+        "num_examples": len(loader.dataset)  # actual number of samples this worker trained on
+    }
+    # Serialize + compress
+    buffer = io.BytesIO()
+    torch.save(payload_dict, buffer)
+    payload_bytes = lz4.frame.compress(buffer.getvalue())
+    return payload_bytes
 
 async def main():
     key_path = ROOT / "simulations" / "keys"
@@ -111,13 +127,39 @@ async def main():
     client = SecureClient(str(key_path))
     client.set_weights_callback(training)
 
+    # Setup shutdown event
+    shutdown_event = asyncio.Event()
+
+    # Define signal handlers for SIGINT/SIGTERM
+    def handle_exit(*args):
+        logger.info("Shutdown signal received")
+        shutdown_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, handle_exit)
+
     # Connect and start FL loop
-    # Now the worker will save received model bytes into cached_model_path
-    await client.connect_fl(
-        master_host, 
-        master_port, 
-        initial_model_path=str(cached_model_path)
-    )
+    fl_task = asyncio.create_task(client.connect_fl(master_host, master_port))
+
+    # Wait until shutdown signal
+    await shutdown_event.wait()
+
+    logger.info("Graceful shutdown starting...")
+    fl_task.cancel()
+    try:
+        await fl_task
+    except asyncio.CancelledError:
+        logger.info("FL loop cancelled cleanly")
+
+    # Optional: cleanup wandb
+    if wandb.run is not None:
+        wandb.finish()
+        logger.info("W&B run finished")
+
+    # Optional: cleanup GPU monitoring
+    pynvml.nvmlShutdown()
+    logger.info("Worker shutdown complete")
 
 if __name__ == "__main__":
     try:
