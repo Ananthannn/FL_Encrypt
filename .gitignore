@@ -74,6 +74,10 @@ simulations/workers/wandb/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+# Wandb - NEVER commit these
+wandb/
+*.wandb
+wandb-run-*
 
 # Flask stuff:
 instance/
