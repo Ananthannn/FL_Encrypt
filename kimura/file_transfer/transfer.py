@@ -25,11 +25,28 @@ async def send_length_prefixed(writer: asyncio.StreamWriter, data: bytes) -> Non
     writer.write(data)
     await writer.drain()
     
-async def recv_length_prefixed(reader: asyncio.StreamReader) -> bytes:
-    length_data = await reader.readexactly(4)
+async def recv_length_prefixed(reader: asyncio.StreamReader) -> bytes | None:
+    try:
+        length_data = await reader.readexactly(4)
+    except asyncio.IncompleteReadError as e:
+        if len(e.partial) == 0:
+            logger.info("recv_length_prefixed: peer closed connection (EOF)")
+            return None
+        raise
+
     length = struct.unpack('>I', length_data)[0]
-    data = await reader.readexactly(length)
-    return data
+
+    if length == 0:
+        logger.warning("recv_length_prefixed: zero-length frame")
+        return b""
+
+    logger.debug(f"recv_length_prefixed: expecting {length} bytes")
+
+    try:
+        return await reader.readexactly(length)
+    except asyncio.IncompleteReadError:
+        logger.warning("recv_length_prefixed: truncated frame")
+        return None
 
 async def chunked_send_file(
     writer: asyncio.StreamWriter,
@@ -77,6 +94,9 @@ async def recv_file(
     """✅ FULL integrity verification with ChunkMetadata."""
     # 1. Read header
     header = await recv_length_prefixed(reader)
+    if header is None:
+        logger.info("recv_file: EOF - no more data expected")
+        return  # MASTER FINISHED SENDING
     total_chunks, expected_size = struct.unpack('>QQ', header)
     
     chunks = []

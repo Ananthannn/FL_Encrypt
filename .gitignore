@@ -21,11 +21,25 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+# Ignore all image files in workers/data/
+simulations/workers/data/**/*.jpg
+simulations/workers/data/**/*.jpeg  
+simulations/workers/data/**/*.png
+simulations/workers/data/**/*.gif
+simulations/workers/data/**/*.bmp
+simulations/workers/data/**/*.tiff
+simulations/workers/data/**/*.webp
+
+# OR simpler - ignore ALL files in data directories (recommended)
+simulations/workers/data/
+
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
-
+*.bin
+*.npz
+simulations/workers/data/
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -50,16 +64,20 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-
+*.pt
 # Translations
 *.mo
 *.pot
-
+simulations/workers/wandb/
 # Django stuff:
 *.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+# Wandb - NEVER commit these
+wandb/
+*.wandb
+wandb-run-*
 
 # Flask stuff:
 instance/
@@ -208,3 +226,9 @@ __marimo__/
 __pycache__/
 *.pyc
 kimura/keys/
+*.bin
+simulations/keys/*.bin
+*.bin
+simulations/shared/master_state.json
+simulations/shared/model.npz
+*.npz

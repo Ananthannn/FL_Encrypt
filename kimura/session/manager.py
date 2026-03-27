@@ -1,5 +1,6 @@
 # session/manager.py - COMPLETE flow w/ your tcp.py
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 from kimura.file_transfer.transfer import chunked_send_file, recv_file
@@ -14,7 +15,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
 class SessionManager:
     def __init__(self, role: str, key_path: str = "./keys", output_path: str = None):
         self.role = role
@@ -26,6 +26,7 @@ class SessionManager:
         self.server_running = False
         self.active_clients = {}  # {client_id: (reader, writer, state_machine)}
         self.client_counter = 0
+        self.worker_id = None  # Will be set during handshake (derived from peer pubkey)
     
     async def establish_channel(self, reader=None, writer=None, host=None, port=DEFAULT_PORT):
         if self.role == "client":
@@ -46,10 +47,11 @@ class SessionManager:
 
             await self.state_machine.transition("recv_handshake", reader=self.reader, writer=self.writer)
             await self.state_machine.transition("send_response", reader=self.reader, writer=self.writer)
+            peer_pubkey = self.state_machine.get_peer_identity_key()
+            worker_id = hashlib.sha256(peer_pubkey).hexdigest()[:16]
+            self.worker_id = worker_id  # Store worker_id in SessionManager
+            self.active_clients[worker_id] = (reader, writer, self.state_machine)
             logger.info(f"{self.role.upper()}: Handshake completed")
-            self.writer.write(b"READY")
-            await self.writer.drain()
-            logger.info(f"{self.role.upper()}: Sent READY signal to client")
         self.ready.set()
 
 
@@ -117,12 +119,21 @@ class SessionManager:
         logger.info("SessionManager cleanup complete")
 
     async def send_data(self, data: bytes):
-        """Send signed weights"""
-        await self.state_machine.send_signed_data(self.writer, data)
-        logger.info(f"{self.role.upper()}: Sent {len(data)/1024/1024:.1f}MB")
+        """Send weights to peer post-handshake"""
+        if not self.state_machine.is_ready_for_transfer():
+            raise RuntimeError("Handshake required first")
 
+        writer = self.writer
+        reader = self.reader
+        if not writer or writer.is_closing():
+            raise RuntimeError("Writer not ready for data transfer")
+
+        await self.state_machine.send_protected(reader=reader, writer=writer, payload=data)
+        logger.info(f"{self.role.upper()}: Sent {len(data)/1024/1024:.3f} MB")
+        
     async def recv_data(self) -> bytes:
-        """Receive + verify weights"""
-        data = await self.state_machine.recv_and_verify_data(self.reader)
-        logger.info(f"{self.role.upper()}: Received {len(data)/1024/1024:.1f}MB")
+        """Receive + verify weights (post-handshake)"""
+        data = await self.state_machine.recv_protected(self.reader, self.writer)
+        logger.info(f"{self.role.upper()}: Received {len(data)/1024/1024:.3f} MB")
         return data
+

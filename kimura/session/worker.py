@@ -1,64 +1,152 @@
+#!/usr/bin/env python3
 import asyncio
+import logging
+from pathlib import Path
 from kimura.session.manager import SessionManager
 from kimura.protocol.constants import DEFAULT_PORT
+from kimura.protocol.state_machine import ProtocolError
+from kimura.protocol.fl_protocol import FLMessageType, serialize_fl_message
 import warnings
+from kimura.protocol.fl_protocol import (
+    FLMessageType,
+    serialize_fl_message,
+    parse_fl_message
+)
+
 warnings.filterwarnings("ignore", category=UserWarning, module="oqs")
-import logging
 logger = logging.getLogger(__name__)
+
+
 class SecureClient:
-    def __init__(self, key_path: str, file_path: str = None):  # Make file_path optional
+    def __init__(self, key_path: str):
+        """
+        FL Client: persistent bidirectional channel
+        key_path: directory with PQC keys
+        """
         self.key_path = key_path
-        self.file_path = file_path
-        self.mgr = None
-        self.on_weights_received = None  # FL callback
-        
-    async def connect_and_send(self, host, port):
-        self.mgr = SessionManager("client", self.key_path)
+        self.weights_callback: callable | None = None
+        self.mgr: SessionManager | None = None
+        self.on_weights_received = None  # callback for FL loop
+        self.current_round = 0  # Initialize round counter
 
-        # 1) Do handshake ONCE
-        await self.mgr.establish_channel(host=host, port=port)
-
-        # 2) WAIT for server readiness (CRUCIAL)
-        ready = await self.mgr.reader.readexactly(5)
-        if ready != b"READY":
-            raise RuntimeError(f"Server not ready (got: {ready})")
-        logger.info("Server ready, starting file transfer...")
-        # 3) NOW send file
-        if self.file_path:
-            await self.mgr.send_file(str(self.file_path))
-            logger.info(f"File {self.file_path} sent successfully")
-
-        # 4) Graceful close
-        await self.mgr.close()
-        logger.info("Connection closed after file transfer")
-
-    # FL PERSISTENT MODE (doesn't close connection)
+    # -----------------------------
+    # Persistent FL Connection
+    # -----------------------------
     async def connect_fl(self, host: str, port: int = DEFAULT_PORT):
-        """FL mode: Persistent bidirectional channel"""
         self.mgr = SessionManager("client", self.key_path)
-        await self.mgr.establish_channel(host=host, port=port)
         
-        # Start FL loop in background
-        asyncio.create_task(self._fl_loop())
-    
-    async def send_weights(self, weights: bytes):
-        """NEW: Send weights over existing channel"""
-        if self.mgr:
-            # You'll add this to SessionManager later
-            await self.mgr.send_data(weights)
-    
-    def set_weights_callback(self, callback):
-        """Callback when server sends weights"""
-        self.on_weights_received = callback
-    
-    async def _fl_loop(self):
-        """Internal FL bidirectional loop"""
+        # 1. Handshake + READY
+        await self.mgr.establish_channel(host=host, port=port)
+        logger.info("Handshake complete with server")
+        ready_msg = serialize_fl_message(FLMessageType.MODEL_LOADED, payload=b"")  # empty payload for ready
+        await self.mgr.send_data(ready_msg)
+        logger.info("WORKER: Sent READY, waiting for master commands...")
+        
+        # 2. PERSISTENT event loop - NEVER exit
         while True:
             try:
-                # Receive from server
-                weights = await self.mgr.recv_data()  # You'll add this
+                logger.info("WORKER: Waiting for data from master...")
+                data = await self.mgr.recv_data()
+                logger.info(f"WORKER: Received {len(data)} bytes of data")
+                
+                # Parse as FL protocol message
+                try:
+                    msg_type, payload = parse_fl_message(data)
+                    logger.info(f"WORKER: Received FL message type={msg_type.name}, {len(payload)} bytes")
+
+                    if msg_type == FLMessageType.MODEL_FILE:
+                        model_bytes = payload
+                        logger.info(f"WORKER: Received MODEL_FILE ({len(model_bytes)} bytes), training now...")
+                        # Train immediately
+                        updated_bytes = await self.weights_callback(model_bytes, self.current_round)
+                        await self._send_update_binary(updated_bytes, round_no=self.current_round)
+                        self.current_round += 1
+                    elif msg_type == FLMessageType.AGGREGATED_MODEL:
+                        model_bytes = payload
+                        logger.info(f"WORKER: Received AGGREGATED_MODEL ({len(model_bytes)} bytes), training now...")
+                    else:
+                        logger.debug(f"WORKER: Ignoring unknown FLMessageType {msg_type}")
+                except Exception as e:
+                    logger.error(f"WORKER: Failed to parse FL message: {e}", exc_info=True)
+
+            except ProtocolError as e:
+                if "Connection closed by peer" in str(e):
+                    logger.info("WORKER: Master disconnected — shutting down ")
+                    break
+                else:
+                    logger.error(f"Protocol error: {e}", exc_info=True)
+                    break     
+            except Exception as e:
+                logger.error(f"WORKER loop error: {e}", exc_info=True)
+                await asyncio.sleep(1)  # Retry
+
+    async def _send_update_binary(self, weights: bytes, round_no: int):
+        if not self.mgr:
+            raise RuntimeError("SessionManager not initialized")
+
+        fl_bytes = serialize_fl_message(
+            FLMessageType.UPDATE,
+            weights
+        )
+
+        await self.mgr.send_data(fl_bytes)
+        logger.info(f"WORKER: Sent {len(weights)/1024:.1f} KB for round {round_no}")
+
+    # -----------------------------
+    # Send updated gradients / weights
+    # -----------------------------
+    async def send_weights(self, weights: bytes):
+        """
+        Send local training updates back to the server.
+        """
+        if self.mgr:
+            await self.mgr.send_data(weights)
+            logger.info(f"Sent {len(weights)/1024:.1f} KB of gradients to server")
+
+    # -----------------------------
+    # Register callback for server updates
+    # -----------------------------
+    # this is where the transferlearning model will be defined NOT TRAINED AND THEN ITS CALLED TO
+    # THE RUN_WORKER FUNCTION TO BE TRAINED NOW OK??? AND 
+    # THEN THE CALLBACK WILL BE CALLED WHEN WEIGHTS ARE RECEIVED
+    # THEN IN 
+    def set_weights_callback(self, callback: callable):
+        """
+        Set callback for handling received server weights.
+        callback should be async and accept bytes -> returns bytes
+        """
+        self.weights_callback = callback
+
+    # -----------------------------
+    # Internal FL loop
+    # -----------------------------
+    async def _fl_loop(self):
+        """
+        Handles FL rounds AFTER round-0.
+        Server always sends first here.
+        """
+        if not self.mgr:
+            raise RuntimeError("FL connection not established")
+
+        while True:
+            try:
+                logger.info("WORKER: waiting for aggregated weights")
+                server_weights = await self.mgr.recv_data()
+
                 if self.on_weights_received:
-                    trained = await self.on_weights_received(weights)
-                    await self.send_weights(trained)
-            except:
+                    updated_weights = await self.on_weights_received(server_weights)
+
+                    logger.info("WORKER: sending updated weights")
+                    if not hasattr(self, "_current_round"):
+                        self._current_round = 1  # round-0 already sent
+
+                    await self._send_update_json(updated_weights, round_no=self._current_round)
+                    self._current_round += 1
+
+            except asyncio.IncompleteReadError:
+                logger.warning("Server closed connection")
                 break
+            except Exception as e:
+                logger.error(f"FL loop error: {e}")
+                break
+
