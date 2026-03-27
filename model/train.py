@@ -1,4 +1,5 @@
 def train_model(x, y, model, optimizer, loss, metrics, epochs, batch_size):
+
     model.compile(
         optimizer=optimizer,
         loss=loss,
@@ -6,7 +7,8 @@ def train_model(x, y, model, optimizer, loss, metrics, epochs, batch_size):
     )
 
     model.fit(
-        x, y,
+        x,
+        y,
         epochs=epochs,
         batch_size=batch_size,
         verbose=1
