@@ -121,7 +121,7 @@ async def training(weights_bytes: bytes, round_no: int) -> bytes:
 
 async def main():
     key_path = ROOT / "simulations" / "keys"
-    master_host = "127.0.0.1"
+    master_host = "192.168.50.1"
     master_port = DEFAULT_PORT
 
     client = SecureClient(str(key_path))
