@@ -14,7 +14,7 @@ if __name__ == "__main__":
     MODEL_META = {
         "model_type": "convnext",
         "variant": "tiny",
-        "pretrained": False,   # ⬅ IMPORTANT
+        "pretrained": True,
         "fine_tune": False,
         "input_shape": (224, 224, 3),
         "num_classes": 10,
@@ -25,7 +25,8 @@ if __name__ == "__main__":
         num_classes=MODEL_META["num_classes"],
     )
 
-    model, _ = model_maker.make_convnext(
+    model, _ = model_maker.build(
+        model_type="convnext",
         variant=MODEL_META["variant"],
         pretrained=MODEL_META["pretrained"],
         fine_tune=MODEL_META["fine_tune"],
@@ -38,8 +39,8 @@ if __name__ == "__main__":
         port=9999,
     )
 
-    for rnd in range(2):
+    for rnd in range(3):
         print(f"\n🌍 Round {rnd+1}")
         server.run_round(client_sizes=[1000, 1000])
 
-    print("\n✅ Training finished")
+    print("\n✅ Federated Training Finished")

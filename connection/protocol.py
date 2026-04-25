@@ -2,6 +2,7 @@ import struct
 import json
 import pickle
 
+
 # -------------------------
 # LOW LEVEL
 # -------------------------
@@ -39,8 +40,5 @@ def send_pickle(sock, obj):
 
 
 def recv_pickle(sock):
-    size = struct.unpack("!Q", sock.recv(8))[0]
-    data = b""
-    while len(data) < size:
-        data += sock.recv(size - len(data))
-    return pickle.loads(data)
+    size = struct.unpack("!Q", recv_exact(sock, 8))[0]
+    return pickle.loads(recv_exact(sock, size))
